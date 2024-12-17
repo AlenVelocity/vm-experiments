@@ -1,0 +1,14 @@
+# VM-related
+vms/
+*.qcow2
+*.iso
+*.img
+
+# Python~
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS-specific
+.DS_Store
+.env 
