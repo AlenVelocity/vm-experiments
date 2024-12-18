@@ -51,16 +51,14 @@ class VMManager:
 
     def download_ubuntu_iso(self, force: bool = False) -> None:
         img_file = self.vm_dir / "ubuntu-20.04-server-cloudimg-arm64.img"
-        qcow2_file = self.vm_dir / "ubuntu-20.04-server.qcow2"
 
-        if qcow2_file.exists() and not force:
-            self.log(f"Ubuntu image already exists at {qcow2_file}")
+        if img_file.exists() and not force:
+            self.log(f"Ubuntu image already exists at {img_file}")
             return
 
         if force:
             self.log("Force download enabled. Removing existing files...")
             img_file.unlink(missing_ok=True)
-            qcow2_file.unlink(missing_ok=True)
 
         url = "https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-arm64.img"
         
@@ -71,13 +69,16 @@ class VMManager:
         with open(img_file, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+        self.log("Ubuntu 20.04 ARM64 Cloud Image downloaded")
 
+    def create_snapshot(self):
+        img_file = self.vm_dir / "ubuntu-20.04-server-cloudimg-arm64.img"
+        qcow2_file = self.vm_dir / "ubuntu-20.04-server.qcow2"
         subprocess.run(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'qcow2', 
                        str(img_file), str(qcow2_file)], check=True)
         subprocess.run(['qemu-img', 'resize', str(qcow2_file), '20G'], check=True)
 
-        img_file.unlink()
-        self.log("Ubuntu 20.04 ARM64 Cloud Image downloaded and prepared")
+        self.log("Ubuntu 20.04 ARM64 Cloud Image Snapshot prepared")
 
     def create_cloud_init_config(self) -> None:
         cloud_init_dir = self.vm_dir / "cloud-init"
@@ -221,6 +222,7 @@ def main():
             vm_manager.check_homebrew()
             vm_manager.install_packages()
             vm_manager.download_ubuntu_iso(args.force)
+            vm_manager.create_snapshot()
             vm_manager.create_cloud_init_config()
             vm_manager.create_start_script()
             vm_manager.start_vm()
