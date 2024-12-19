@@ -8,7 +8,12 @@ vms/
 __pycache__/
 *.py[cod]
 *$py.class
+venv
+.venv
+venv_*
 
 # OS-specific
 .DS_Store
-.env 
+.env
+
+node_modules/
