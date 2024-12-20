@@ -296,3 +296,138 @@ class LibvirtManager:
             libvirt.VIR_DOMAIN_PMSUSPENDED: "suspended"
         }
         return states.get(state, "unknown")
+
+    def create_snapshot(self, vm_id: str, name: str, description: str = "") -> bool:
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return False
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            snapshot_xml = f"""
+            <domainsnapshot>
+                <name>{name}</name>
+                <description>{description}</description>
+            </domainsnapshot>
+            """
+            snapshot = domain.snapshotCreateXML(snapshot_xml)
+            return bool(snapshot)
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to create snapshot: {str(e)}")
+
+    def list_snapshots(self, vm_id: str) -> List[Dict]:
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return []
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            snapshots = []
+            for snapshot in domain.listAllSnapshots():
+                snapshot_time = snapshot.getParent().getTime()
+                snapshot_info = {
+                    "name": snapshot.getName(),
+                    "description": snapshot.getXMLDesc(),
+                    "creation_time": snapshot_time.tv_sec if snapshot_time else None,
+                    "state": snapshot.getState()[0],
+                    "parent": snapshot.getParent().getName() if snapshot.getParent() else None
+                }
+                snapshots.append(snapshot_info)
+            return snapshots
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to list snapshots: {str(e)}")
+
+    def revert_to_snapshot(self, vm_id: str, snapshot_name: str) -> bool:
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return False
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            snapshot = domain.snapshotLookupByName(snapshot_name)
+            
+            if domain.isActive():
+                domain.destroy()
+            
+            result = domain.revertToSnapshot(snapshot)
+            return result == 0
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to revert to snapshot: {str(e)}")
+
+    def delete_snapshot(self, vm_id: str, snapshot_name: str) -> bool:
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return False
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            snapshot = domain.snapshotLookupByName(snapshot_name)
+            result = snapshot.delete()
+            return result == 0
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to delete snapshot: {str(e)}")
+
+    def create_snapshot_and_export(self, vm_id: str, name: str, export_path: Path) -> bool:
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return False
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            
+            if domain.isActive():
+                domain.suspend()
+            
+            try:
+                pool = self.conn.storagePoolLookupByName('default')
+                volume = pool.storageVolLookupByName(f"{vm.name}.qcow2")
+                
+                snapshot_xml = f"""
+                <domainsnapshot>
+                    <name>{name}</name>
+                    <disk name='vda' snapshot='external'>
+                        <source file='{export_path}'/>
+                    </disk>
+                </domainsnapshot>
+                """
+                
+                snapshot = domain.snapshotCreateXML(snapshot_xml, 
+                    libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY)
+                
+                return bool(snapshot)
+            finally:
+                if domain.isActive():
+                    domain.resume()
+                
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to create and export snapshot: {str(e)}")
+
+    def import_snapshot(self, vm_id: str, snapshot_path: Path) -> bool:
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return False
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            
+            if domain.isActive():
+                domain.destroy()
+            
+            pool = self.conn.storagePoolLookupByName('default')
+            volume = pool.storageVolLookupByName(f"{vm.name}.qcow2")
+            
+            import_xml = f"""
+            <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2'/>
+                <source file='{snapshot_path}'/>
+                <target dev='vda' bus='virtio'/>
+            </disk>
+            """
+            
+            flags = (libvirt.VIR_DOMAIN_BLOCK_COPY_REUSE_EXT |
+                    libvirt.VIR_DOMAIN_BLOCK_COPY_SHALLOW)
+            
+            domain.blockCopy('vda', import_xml, flags=flags)
+            return True
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to import snapshot: {str(e)}")
