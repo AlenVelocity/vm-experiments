@@ -19,6 +19,7 @@ import threading
 import traceback
 import logging
 import ipaddress
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,14 +31,14 @@ sys.path.append(str(root_dir))
 
 # Import after adding to path
 from vpc import VPCManager
-from main import VMManager
+from .vm import LibvirtManager
 
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 vpc_manager = VPCManager()
-vm_manager = VMManager()
+vm_manager = LibvirtManager()
 
 # Store active console sessions
 console_sessions = {}
@@ -204,40 +205,26 @@ def delete_vpc(name):
 @app.route('/api/vms/list', methods=['GET'])
 def list_vms():
     try:
-        # Get VM metadata
-        vm_metadata = vm_manager._load_vm_metadata()
-        
-        # Get running VMs
-        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
-        running_vms = {}
-        for line in result.stdout.splitlines():
-            if 'qemu-system-aarch64' in line and 'grep' not in line:
-                # Extract VM name and SSH port from the command line
-                vm_name = None
-                ssh_port = None
-                for part in line.split():
-                    if '.qcow2' in part:
-                        vm_name = Path(part).stem
-                    elif 'hostfwd=tcp::' in part:
-                        ssh_port = part.split(':')[-2].split('-')[0]
-                if vm_name:
-                    running_vms[vm_name] = ssh_port
-
-        # Combine metadata with running state
         vms_list = []
-        for vm_name, metadata in vm_metadata.items():
-            vm_info = {
-                'name': vm_name,
-                'vpc': metadata.get('vpc', ''),
-                'private_ip': metadata.get('private_ip', ''),
-                'public_ip': metadata.get('public_ip', ''),
-                'ssh_port': metadata.get('ssh_port', ''),
-                'status': 'running' if vm_name in running_vms else 'stopped'
-            }
-            # Update SSH port from running process if available
-            if vm_name in running_vms and running_vms[vm_name]:
-                vm_info['ssh_port'] = running_vms[vm_name]
-            vms_list.append(vm_info)
+        for vm_id, vm in vm_manager.vms.items():
+            try:
+                status = vm_manager.get_vm_status(vm_id)
+                vms_list.append({
+                    'name': vm.name,
+                    'vpc': vm.config.network_name,
+                    'status': status['state'],
+                    'cpu_cores': status['cpu_cores'],
+                    'memory_mb': status['memory_mb'],
+                    'network': status['network']
+                })
+            except Exception as e:
+                logger.error(f"Error getting status for VM {vm.name}: {str(e)}")
+                vms_list.append({
+                    'name': vm.name,
+                    'vpc': vm.config.network_name,
+                    'status': 'error',
+                    'error': str(e)
+                })
             
         return jsonify({'vms': vms_list})
     except Exception as e:
@@ -260,14 +247,30 @@ def create_vm():
         if not vpc:
             return jsonify({'error': f'VPC {vpc_name} does not exist'}), 404
             
-        # Download Ubuntu image if needed
-        vm_manager.download_ubuntu_iso()
+        # Check if Ubuntu image exists before downloading
+        img_file = vm_manager.vm_dir / "ubuntu-20.04-server-cloudimg-arm64.img"
+        if not img_file.exists():
+            logger.info("Ubuntu image not found, downloading...")
+            try:
+                vm_manager.download_ubuntu_iso()
+            except requests.exceptions.ConnectionError as e:
+                error_msg = "Failed to download Ubuntu image: Connection error. Please check your internet connection and try again."
+                logger.error(f"{error_msg} Details: {str(e)}")
+                return jsonify({'error': error_msg}), 503
+            except Exception as e:
+                error_msg = f"Failed to download Ubuntu image: {str(e)}"
+                logger.error(error_msg)
+                return jsonify({'error': error_msg}), 500
+        else:
+            logger.info("Ubuntu image already exists, skipping download")
         
         # Create the VM
         vm_manager.create_vm(name, vpc_name)
         
         return jsonify({'message': f'VM {name} created successfully in VPC {vpc_name}'})
     except Exception as e:
+        logger.error(f"Error creating VM: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/vms/<name>/start', methods=['POST'])
