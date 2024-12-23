@@ -21,12 +21,12 @@ function VPCList() {
 
   const fetchVPCs = async () => {
     try {
-      const response = await fetch('http://localhost:5000/api/vpc/list');
+      const response = await fetch('http://localhost:5000/api/clusters');
       const data = await response.json();
-      setVpcs(data.vpcs || []);
+      setVpcs(data.clusters || []);
     } catch (error) {
       toast({
-        title: 'Error fetching VPCs',
+        title: 'Error fetching clusters',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -37,13 +37,13 @@ function VPCList() {
 
   const handleDelete = async (vpcName) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/vpc/${vpcName}`, {
+      const response = await fetch(`http://localhost:5000/api/clusters/${vpcName}`, {
         method: 'DELETE',
       });
       if (response.ok) {
         toast({
-          title: 'VPC deleted',
-          description: `Successfully deleted VPC ${vpcName}`,
+          title: 'Cluster deleted',
+          description: `Successfully deleted cluster ${vpcName}`,
           status: 'success',
           duration: 3000,
           isClosable: true,
@@ -52,7 +52,7 @@ function VPCList() {
       }
     } catch (error) {
       toast({
-        title: 'Error deleting VPC',
+        title: 'Error deleting cluster',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -68,9 +68,9 @@ function VPCList() {
   return (
     <Box width="100%" maxW="1200px" mx="auto" p={4}>
       <HStack justify="space-between" mb={6}>
-        <Heading size="lg">Virtual Private Clouds</Heading>
+        <Heading size="lg">Clusters (VPCs)</Heading>
         <Button colorScheme="blue" onClick={() => setIsCreateModalOpen(true)}>
-          Create VPC
+          Create Cluster
         </Button>
       </HStack>
 
@@ -79,7 +79,8 @@ function VPCList() {
           <Tr>
             <Th>Name</Th>
             <Th>CIDR</Th>
-            <Th>Used IPs</Th>
+            <Th>Private IPs</Th>
+            <Th>Public IPs</Th>
             <Th>Actions</Th>
           </Tr>
         </Thead>
@@ -88,7 +89,8 @@ function VPCList() {
             <Tr key={vpc.name}>
               <Td>{vpc.name}</Td>
               <Td>{vpc.cidr}</Td>
-              <Td>{vpc.used_ips?.length || 0}</Td>
+              <Td>{vpc.used_private_ips?.length || 0}</Td>
+              <Td>{vpc.used_public_ips?.length || 0}</Td>
               <Td>
                 <Button
                   colorScheme="red"

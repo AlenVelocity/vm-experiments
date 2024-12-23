@@ -33,9 +33,29 @@ class LibvirtManager:
         self.vm_dir = Path("vms")
         self.vm_dir.mkdir(parents=True, exist_ok=True)
         self.network_manager = NetworkManager()
-        self.conn = libvirt.open('qemu:///session')
+        
+        # Try different connection methods
+        connection_uris = [
+            'qemu+unix:///system?socket=/opt/homebrew/var/run/libvirt/libvirt-sock',
+            'qemu:///system',
+            'qemu:///session'
+        ]
+        
+        last_error = None
+        for uri in connection_uris:
+            try:
+                self.conn = libvirt.open(uri)
+                if self.conn:
+                    print(f"Successfully connected to libvirt using {uri}")
+                    break
+            except libvirt.libvirtError as e:
+                last_error = e
+                print(f"Failed to connect using {uri}: {str(e)}")
+                continue
+        
         if not self.conn:
-            raise Exception('Failed to connect to QEMU/KVM')
+            raise Exception(f'Failed to connect to libvirt: {str(last_error)}')
+            
         self._init_storage_pool()
         self.vms: Dict[str, VM] = self._load_vms()
 
@@ -114,25 +134,34 @@ class LibvirtManager:
         ET.SubElement(domain, 'currentMemory', unit='MiB').text = str(vm.config.memory_mb)
         vcpu = ET.SubElement(domain, 'vcpu', placement='static')
         vcpu.text = str(vm.config.cpu_cores)
+        
         os = ET.SubElement(domain, 'os')
         ET.SubElement(os, 'type', arch='aarch64', machine='virt').text = 'hvm'
+        ET.SubElement(os, 'loader', readonly='yes', type='pflash').text = '/opt/homebrew/share/qemu/edk2-aarch64-code.fd'
+        ET.SubElement(os, 'nvram').text = '/opt/homebrew/share/qemu/edk2-arm-vars.fd'
         ET.SubElement(os, 'boot', dev='hd')
-        features = ET.SubElement(domain, 'features')
-        ET.SubElement(features, 'hvf')
-        cpu = ET.SubElement(domain, 'cpu', mode='host-passthrough')
+        
+        cpu = ET.SubElement(domain, 'cpu', mode='custom')
+        ET.SubElement(cpu, 'model', fallback='allow').text = 'cortex-a72'
+        
         devices = ET.SubElement(domain, 'devices')
         ET.SubElement(devices, 'emulator').text = '/opt/homebrew/bin/qemu-system-aarch64'
+        
         disk = ET.SubElement(devices, 'disk', type='file', device='disk')
         ET.SubElement(disk, 'driver', name='qemu', type='qcow2')
         ET.SubElement(disk, 'source', file=str(disk_path))
         ET.SubElement(disk, 'target', dev='vda', bus='virtio')
+        
         interface = ET.SubElement(devices, 'interface', type='user')
         ET.SubElement(interface, 'model', type='virtio')
         ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
+        
         console = ET.SubElement(devices, 'console', type='pty')
         ET.SubElement(console, 'target', type='serial', port='0')
+        
         serial = ET.SubElement(devices, 'serial', type='pty')
         ET.SubElement(serial, 'target', port='0')
+        
         return ET.tostring(domain, encoding='unicode')
 
     def create_vm(self, name: str, vpc_name: str) -> VM:

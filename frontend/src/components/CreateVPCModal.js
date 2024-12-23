@@ -25,7 +25,7 @@ function CreateVPCModal({ isOpen, onClose, onVPCCreated }) {
     setIsLoading(true);
 
     try {
-      const response = await fetch('http://localhost:5000/api/vpc/create', {
+      const response = await fetch('http://localhost:5000/api/clusters', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -35,8 +35,8 @@ function CreateVPCModal({ isOpen, onClose, onVPCCreated }) {
 
       if (response.ok) {
         toast({
-          title: 'VPC created',
-          description: `Successfully created VPC ${name}`,
+          title: 'Cluster created',
+          description: `Successfully created cluster ${name}`,
           status: 'success',
           duration: 3000,
           isClosable: true,
@@ -47,11 +47,11 @@ function CreateVPCModal({ isOpen, onClose, onVPCCreated }) {
         setCidr('192.168.0.0/16');
       } else {
         const error = await response.json();
-        throw new Error(error.message || 'Failed to create VPC');
+        throw new Error(error.message || 'Failed to create cluster');
       }
     } catch (error) {
       toast({
-        title: 'Error creating VPC',
+        title: 'Error creating cluster',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -67,15 +67,15 @@ function CreateVPCModal({ isOpen, onClose, onVPCCreated }) {
       <ModalOverlay />
       <ModalContent>
         <form onSubmit={handleSubmit}>
-          <ModalHeader>Create New VPC</ModalHeader>
+          <ModalHeader>Create New Cluster</ModalHeader>
           <ModalCloseButton />
           <ModalBody>
             <FormControl isRequired>
-              <FormLabel>VPC Name</FormLabel>
+              <FormLabel>Cluster Name</FormLabel>
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="my-vpc"
+                placeholder="my-cluster"
               />
             </FormControl>
             <FormControl mt={4}>

@@ -16,20 +16,20 @@ import {
 } from '@chakra-ui/react';
 import VMConsoleModal from './VMConsoleModal';
 
-function VMList() {
-  const [vms, setVMs] = useState([]);
+function VMList({ cluster }) {
+  const [machines, setMachines] = useState([]);
   const [selectedVM, setSelectedVM] = useState(null);
   const { isOpen, onOpen, onClose } = useDisclosure();
   const toast = useToast();
 
-  const fetchVMs = async () => {
+  const fetchMachines = async () => {
     try {
-      const response = await fetch('http://localhost:5000/api/vms/list');
+      const response = await fetch(`http://localhost:5000/api/clusters/${cluster}/machines`);
       const data = await response.json();
-      setVMs(data.vms || []);
+      setMachines(data.machines || []);
     } catch (error) {
       toast({
-        title: 'Error fetching VMs',
+        title: 'Error fetching machines',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -38,24 +38,24 @@ function VMList() {
     }
   };
 
-  const handleStart = async (vmName) => {
+  const handleStart = async (machineName) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/vms/${vmName}/start`, {
+      const response = await fetch(`http://localhost:5000/api/clusters/${cluster}/machines/${machineName}/start`, {
         method: 'POST',
       });
       if (response.ok) {
         toast({
-          title: 'VM Started',
-          description: `Successfully started VM ${vmName}`,
+          title: 'Machine Started',
+          description: `Successfully started machine ${machineName}`,
           status: 'success',
           duration: 3000,
           isClosable: true,
         });
-        fetchVMs();
+        fetchMachines();
       }
     } catch (error) {
       toast({
-        title: 'Error starting VM',
+        title: 'Error starting machine',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -64,24 +64,24 @@ function VMList() {
     }
   };
 
-  const handleStop = async (vmName) => {
+  const handleStop = async (machineName) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/vms/${vmName}/stop`, {
+      const response = await fetch(`http://localhost:5000/api/clusters/${cluster}/machines/${machineName}/stop`, {
         method: 'POST',
       });
       if (response.ok) {
         toast({
-          title: 'VM Stopped',
-          description: `Successfully stopped VM ${vmName}`,
+          title: 'Machine Stopped',
+          description: `Successfully stopped machine ${machineName}`,
           status: 'success',
           duration: 3000,
           isClosable: true,
         });
-        fetchVMs();
+        fetchMachines();
       }
     } catch (error) {
       toast({
-        title: 'Error stopping VM',
+        title: 'Error stopping machine',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -90,71 +90,144 @@ function VMList() {
     }
   };
 
-  const handleOpenConsole = (vmName) => {
-    setSelectedVM(vmName);
-    onOpen();
+  const handleRestart = async (machineName) => {
+    try {
+      const response = await fetch(`http://localhost:5000/api/clusters/${cluster}/machines/${machineName}/restart`, {
+        method: 'POST',
+      });
+      if (response.ok) {
+        toast({
+          title: 'Machine Restarted',
+          description: `Successfully restarted machine ${machineName}`,
+          status: 'success',
+          duration: 3000,
+          isClosable: true,
+        });
+        fetchMachines();
+      }
+    } catch (error) {
+      toast({
+        title: 'Error restarting machine',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+
+  const handleTerminate = async (machineName) => {
+    if (window.confirm(`Are you sure you want to terminate ${machineName}? This action cannot be undone.`)) {
+      try {
+        const response = await fetch(`http://localhost:5000/api/clusters/${cluster}/machines/${machineName}/terminate`, {
+          method: 'POST',
+        });
+        if (response.ok) {
+          toast({
+            title: 'Machine Terminated',
+            description: `Successfully terminated machine ${machineName}`,
+            status: 'success',
+            duration: 3000,
+            isClosable: true,
+          });
+          fetchMachines();
+        }
+      } catch (error) {
+        toast({
+          title: 'Error terminating machine',
+          description: error.message,
+          status: 'error',
+          duration: 5000,
+          isClosable: true,
+        });
+      }
+    }
+  };
+
+  const handleOpenConsole = async (machineName) => {
+    try {
+      const response = await fetch(`http://localhost:5000/api/clusters/${cluster}/machines/${machineName}/serial-console`);
+      const data = await response.json();
+      if (data.console_url) {
+        setSelectedVM(machineName);
+        onOpen();
+      }
+    } catch (error) {
+      toast({
+        title: 'Error opening console',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    }
   };
 
   useEffect(() => {
-    fetchVMs();
-    const interval = setInterval(fetchVMs, 5000);
+    fetchMachines();
+    const interval = setInterval(fetchMachines, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [cluster]);
 
   return (
     <Box width="100%" maxW="1200px" mx="auto" p={4}>
       <HStack justify="space-between" mb={6}>
-        <Heading size="lg">Virtual Machines</Heading>
+        <Heading size="lg">Machines</Heading>
       </HStack>
 
       <Table variant="simple">
         <Thead>
           <Tr>
             <Th>Name</Th>
-            <Th>VPC</Th>
-            <Th>Private IP</Th>
-            <Th>Public IP</Th>
-            <Th>SSH Port</Th>
             <Th>Status</Th>
+            <Th>CPU Cores</Th>
+            <Th>Memory (MB)</Th>
+            <Th>SSH Port</Th>
             <Th>Actions</Th>
           </Tr>
         </Thead>
         <Tbody>
-          {vms.map((vm) => (
-            <Tr key={vm.name}>
-              <Td>{vm.name}</Td>
-              <Td>{vm.vpc}</Td>
-              <Td>{vm.private_ip}</Td>
-              <Td>{vm.public_ip}</Td>
+          {machines.map((machine) => (
+            <Tr key={machine.id}>
+              <Td>{machine.name}</Td>
               <Td>
-                {vm.status === 'running' && vm.ssh_port ? (
+                <Badge
+                  colorScheme={machine.status === 'running' ? 'green' : 'gray'}
+                >
+                  {machine.status}
+                </Badge>
+              </Td>
+              <Td>{machine.cpu_cores}</Td>
+              <Td>{machine.memory_mb}</Td>
+              <Td>
+                {machine.status === 'running' && machine.ssh_port ? (
                   <Badge colorScheme="blue">
-                    localhost:{vm.ssh_port}
+                    localhost:{machine.ssh_port}
                   </Badge>
                 ) : '-'}
               </Td>
               <Td>
-                <Badge
-                  colorScheme={vm.status === 'running' ? 'green' : 'gray'}
-                >
-                  {vm.status}
-                </Badge>
-              </Td>
-              <Td>
                 <HStack spacing={2}>
-                  {vm.status === 'running' ? (
+                  {machine.status === 'running' ? (
                     <>
                       <Button
                         colorScheme="red"
                         size="sm"
-                        onClick={() => handleStop(vm.name)}
+                        onClick={() => handleStop(machine.name)}
                       >
                         Stop
                       </Button>
                       <Button
+                        colorScheme="yellow"
+                        size="sm"
+                        onClick={() => handleRestart(machine.name)}
+                      >
+                        Restart
+                      </Button>
+                      <Button
                         colorScheme="blue"
                         size="sm"
-                        onClick={() => handleOpenConsole(vm.name)}
+                        onClick={() => handleOpenConsole(machine.name)}
                       >
                         Console
                       </Button>
@@ -163,11 +236,19 @@ function VMList() {
                     <Button
                       colorScheme="green"
                       size="sm"
-                      onClick={() => handleStart(vm.name)}
+                      onClick={() => handleStart(machine.name)}
                     >
                       Start
                     </Button>
                   )}
+                  <Button
+                    colorScheme="red"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleTerminate(machine.name)}
+                  >
+                    Terminate
+                  </Button>
                 </HStack>
               </Td>
             </Tr>
