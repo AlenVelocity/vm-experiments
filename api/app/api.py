@@ -338,5 +338,95 @@ def stop_vm(name):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/vms/<vm_id>/snapshots', methods=['GET'])
+def list_snapshots(vm_id):
+    try:
+        snapshots = vm_manager.list_snapshots(vm_id)
+        return jsonify({'snapshots': snapshots})
+    except Exception as e:
+        logger.error(f"Error listing snapshots: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/snapshots', methods=['POST'])
+def create_snapshot(vm_id):
+    try:
+        data = request.json
+        name = data.get('name')
+        description = data.get('description', '')
+        
+        if not name:
+            return jsonify({'error': 'Snapshot name is required'}), 400
+        
+        success = vm_manager.create_snapshot(vm_id, name, description)
+        if success:
+            return jsonify({'message': f'Snapshot {name} created successfully'})
+        return jsonify({'error': 'Failed to create snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error creating snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/snapshots/<name>', methods=['DELETE'])
+def delete_snapshot(vm_id, name):
+    try:
+        success = vm_manager.delete_snapshot(vm_id, name)
+        if success:
+            return jsonify({'message': f'Snapshot {name} deleted successfully'})
+        return jsonify({'error': 'Failed to delete snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error deleting snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/snapshots/<name>/revert', methods=['POST'])
+def revert_to_snapshot(vm_id, name):
+    try:
+        success = vm_manager.revert_to_snapshot(vm_id, name)
+        if success:
+            return jsonify({'message': f'Reverted to snapshot {name} successfully'})
+        return jsonify({'error': 'Failed to revert to snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error reverting to snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/snapshots/export', methods=['POST'])
+def export_snapshot(vm_id):
+    try:
+        data = request.json
+        name = data.get('name')
+        export_path = data.get('path')
+        
+        if not name or not export_path:
+            return jsonify({'error': 'Snapshot name and export path are required'}), 400
+        
+        success = vm_manager.create_snapshot_and_export(vm_id, name, Path(export_path))
+        if success:
+            return jsonify({'message': f'Snapshot {name} exported successfully to {export_path}'})
+        return jsonify({'error': 'Failed to export snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error exporting snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/snapshots/import', methods=['POST'])
+def import_snapshot(vm_id):
+    try:
+        data = request.json
+        snapshot_path = data.get('path')
+        
+        if not snapshot_path:
+            return jsonify({'error': 'Snapshot path is required'}), 400
+        
+        success = vm_manager.import_snapshot(vm_id, Path(snapshot_path))
+        if success:
+            return jsonify({'message': 'Snapshot imported successfully'})
+        return jsonify({'error': 'Failed to import snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error importing snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False) 
