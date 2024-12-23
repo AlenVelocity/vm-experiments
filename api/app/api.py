@@ -428,5 +428,554 @@ def import_snapshot(vm_id):
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+# EC2-like endpoints
+
+# Cluster operations
+@app.route('/api/clusters', methods=['GET'])
+def list_clusters():
+    """List all VPCs (clusters)"""
+    try:
+        vpcs = vpc_manager.list_vpcs()
+        vpc_data = []
+        for vpc_name in vpcs:
+            vpc = vpc_manager.get_vpc(vpc_name)
+            if vpc:
+                vpc_data.append({
+                    'name': vpc.name,
+                    'cidr': vpc.cidr,
+                    'used_private_ips': vpc.used_private_ips,
+                    'used_public_ips': vpc.used_public_ips
+                })
+        return jsonify({'clusters': vpc_data})
+    except Exception as e:
+        logger.error(f"Error listing clusters: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters', methods=['POST'])
+def create_cluster():
+    """Create a new VPC (cluster)"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+
+        name = data.get('name')
+        cidr = data.get('cidr', '192.168.0.0/16')
+        
+        if not name:
+            return jsonify({'error': 'Cluster name is required'}), 400
+
+        try:
+            ipaddress.ip_network(cidr)
+        except ValueError as e:
+            return jsonify({'error': f'Invalid CIDR format: {str(e)}'}), 400
+            
+        vpc = vpc_manager.create_vpc(name, cidr)
+        
+        return jsonify({
+            'cluster': {
+                'name': vpc.name,
+                'cidr': vpc.cidr,
+                'used_private_ips': vpc.used_private_ips,
+                'used_public_ips': vpc.used_public_ips
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error creating cluster: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<name>', methods=['GET'])
+def get_cluster(name):
+    """Get details of a specific VPC (cluster)"""
+    try:
+        vpc = vpc_manager.get_vpc(name)
+        if not vpc:
+            return jsonify({'error': f'Cluster {name} not found'}), 404
+            
+        return jsonify({
+            'cluster': {
+                'name': vpc.name,
+                'cidr': vpc.cidr,
+                'used_private_ips': vpc.used_private_ips,
+                'used_public_ips': vpc.used_public_ips
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error getting cluster: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+# Firewall rules
+@app.route('/api/clusters/<cluster>/firewall/rules', methods=['GET'])
+def list_firewall_rules(cluster):
+    """List firewall rules for a cluster"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement firewall rules in VPC
+        return jsonify({'rules': []})
+    except Exception as e:
+        logger.error(f"Error listing firewall rules: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/firewall/rules', methods=['POST'])
+def create_firewall_rule(cluster):
+    """Create a new firewall rule"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement firewall rules in VPC
+        return jsonify({'message': 'Firewall rule created'}), 501
+    except Exception as e:
+        logger.error(f"Error creating firewall rule: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/firewall/rules/<rule>', methods=['DELETE'])
+def delete_firewall_rule(cluster, rule):
+    """Delete a firewall rule"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement firewall rules in VPC
+        return jsonify({'message': 'Firewall rule deleted'}), 501
+    except Exception as e:
+        logger.error(f"Error deleting firewall rule: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+# Images and machine types
+@app.route('/api/images', methods=['GET'])
+def list_images():
+    """List available VM images"""
+    try:
+        # For now, we only support Ubuntu 20.04 ARM64
+        images = [{
+            'id': 'ubuntu-20.04-arm64',
+            'name': 'Ubuntu 20.04 ARM64',
+            'architecture': 'arm64',
+            'version': '20.04',
+            'type': 'linux'
+        }]
+        return jsonify({'images': images})
+    except Exception as e:
+        logger.error(f"Error listing images: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/machine-types', methods=['GET'])
+def list_machine_types():
+    """List available machine types"""
+    try:
+        types = [{
+            'id': 'default',
+            'name': 'Default',
+            'cpu_cores': 2,
+            'memory_mb': 2048,
+            'disk_gb': 20
+        }]
+        return jsonify({'machine_types': types})
+    except Exception as e:
+        logger.error(f"Error listing machine types: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+# VM operations in clusters
+@app.route('/api/clusters/<cluster>/machines', methods=['GET'])
+def list_cluster_machines(cluster):
+    """List machines in a cluster"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        machines = []
+        for vm_id, vm in vm_manager.vms.items():
+            if vm.config.network_name == cluster:
+                try:
+                    status = vm_manager.get_vm_status(vm_id)
+                    machines.append({
+                        'id': vm_id,
+                        'name': vm.name,
+                        'status': status['state'],
+                        'cpu_cores': status['cpu_cores'],
+                        'memory_mb': status['memory_mb'],
+                        'network': status['network']
+                    })
+                except Exception as e:
+                    logger.error(f"Error getting status for VM {vm.name}: {str(e)}")
+                    machines.append({
+                        'id': vm_id,
+                        'name': vm.name,
+                        'status': 'error',
+                        'error': str(e)
+                    })
+        
+        return jsonify({'machines': machines})
+    except Exception as e:
+        logger.error(f"Error listing machines: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines', methods=['POST'])
+def create_cluster_machine(cluster):
+    """Create a new machine in a cluster"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        data = request.json
+        name = data.get('name')
+        
+        if not name:
+            return jsonify({'error': 'Machine name is required'}), 400
+        
+        vm = vm_manager.create_vm(name, cluster)
+        
+        return jsonify({
+            'machine': {
+                'id': vm.id,
+                'name': vm.name,
+                'cluster': cluster
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error creating machine: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>', methods=['GET'])
+def get_cluster_machine(cluster, machine):
+    """Get details of a specific machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        status = vm_manager.get_vm_status(vm.id)
+        
+        return jsonify({
+            'machine': {
+                'id': vm.id,
+                'name': vm.name,
+                'status': status['state'],
+                'cpu_cores': status['cpu_cores'],
+                'memory_mb': status['memory_mb'],
+                'network': status['network'],
+                'ssh_port': status.get('ssh_port')
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error getting machine: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/start', methods=['POST'])
+def start_cluster_machine(cluster, machine):
+    """Start a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        success = vm_manager.start_vm(vm.id)
+        if success:
+            return jsonify({'message': f'Machine {machine} started successfully'})
+        return jsonify({'error': 'Failed to start machine'}), 500
+    except Exception as e:
+        logger.error(f"Error starting machine: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/stop', methods=['POST'])
+def stop_cluster_machine(cluster, machine):
+    """Stop a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        success = vm_manager.stop_vm(vm.id)
+        if success:
+            return jsonify({'message': f'Machine {machine} stopped successfully'})
+        return jsonify({'error': 'Failed to stop machine'}), 500
+    except Exception as e:
+        logger.error(f"Error stopping machine: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/restart', methods=['POST'])
+def restart_cluster_machine(cluster, machine):
+    """Restart a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        success = vm_manager.stop_vm(vm.id)
+        if not success:
+            return jsonify({'error': 'Failed to stop machine for restart'}), 500
+            
+        success = vm_manager.start_vm(vm.id)
+        if success:
+            return jsonify({'message': f'Machine {machine} restarted successfully'})
+        return jsonify({'error': 'Failed to restart machine'}), 500
+    except Exception as e:
+        logger.error(f"Error restarting machine: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/resize', methods=['POST'])
+def resize_cluster_machine(cluster, machine):
+    """Resize a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement machine resizing
+        return jsonify({'message': 'Machine resize not implemented'}), 501
+    except Exception as e:
+        logger.error(f"Error resizing machine: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/terminate', methods=['POST'])
+def terminate_cluster_machine(cluster, machine):
+    """Terminate (delete) a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        success = vm_manager.delete_vm(vm.id)
+        if success:
+            return jsonify({'message': f'Machine {machine} terminated successfully'})
+        return jsonify({'error': 'Failed to terminate machine'}), 500
+    except Exception as e:
+        logger.error(f"Error terminating machine: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/snapshot', methods=['POST'])
+def create_machine_snapshot(cluster, machine):
+    """Create a data snapshot of a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        data = request.json
+        name = data.get('name')
+        description = data.get('description', '')
+        
+        if not name:
+            return jsonify({'error': 'Snapshot name is required'}), 400
+            
+        success = vm_manager.create_snapshot(vm.id, name, description)
+        if success:
+            return jsonify({'message': f'Snapshot {name} created successfully'})
+        return jsonify({'error': 'Failed to create snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error creating snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/image', methods=['POST'])
+def create_machine_image(cluster, machine):
+    """Create a bootable image from a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement creating bootable images
+        return jsonify({'message': 'Creating bootable images not implemented'}), 501
+    except Exception as e:
+        logger.error(f"Error creating image: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/serial-console', methods=['GET'])
+def get_machine_console(cluster, machine):
+    """Get serial console URL for a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        # Return WebSocket URL for console
+        return jsonify({
+            'console_url': f'ws://localhost:5000/socket.io/?vmName={machine}'
+        })
+    except Exception as e:
+        logger.error(f"Error getting console URL: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+# Disk operations
+@app.route('/api/clusters/<cluster>/machines/<machine>/disks', methods=['POST'])
+def attach_disk(cluster, machine):
+    """Attach a disk to a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement disk operations
+        return jsonify({'message': 'Disk operations not implemented'}), 501
+    except Exception as e:
+        logger.error(f"Error attaching disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/disks/<disk>', methods=['DELETE'])
+def detach_disk(cluster, machine, disk):
+    """Detach a disk from a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement disk operations
+        return jsonify({'message': 'Disk operations not implemented'}), 501
+    except Exception as e:
+        logger.error(f"Error detaching disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/disks', methods=['GET'])
+def list_cluster_disks(cluster):
+    """List all disks in a cluster"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement disk operations
+        return jsonify({'disks': []})
+    except Exception as e:
+        logger.error(f"Error listing disks: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/disks/<disk>', methods=['GET'])
+def get_cluster_disk(cluster, disk):
+    """Get details of a specific disk"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement disk operations
+        return jsonify({'error': 'Disk operations not implemented'}), 501
+    except Exception as e:
+        logger.error(f"Error getting disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/disks/<disk>/size', methods=['POST'])
+def resize_disk(cluster, disk):
+    """Resize a disk"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement disk operations
+        return jsonify({'message': 'Disk operations not implemented'}), 501
+    except Exception as e:
+        logger.error(f"Error resizing disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/disks/<disk>/performance', methods=['POST'])
+def update_disk_performance(cluster, disk):
+    """Update disk performance settings"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        # TODO: Implement disk operations
+        return jsonify({'message': 'Disk operations not implemented'}), 501
+    except Exception as e:
+        logger.error(f"Error updating disk performance: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False) 
