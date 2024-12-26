@@ -10,10 +10,16 @@ import {
   Button,
   Badge,
   HStack,
+  VStack,
   useToast,
   Heading,
   useDisclosure,
+  Text,
+  Tooltip,
+  IconButton,
+  Code,
 } from '@chakra-ui/react';
+import { CopyIcon } from '@chakra-ui/icons';
 import VMConsoleModal from './VMConsoleModal';
 
 function VMList({ cluster }) {
@@ -36,6 +42,15 @@ function VMList({ cluster }) {
         isClosable: true,
       });
     }
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    toast({
+      title: 'Copied to clipboard',
+      status: 'success',
+      duration: 2000,
+    });
   };
 
   const handleStart = async (machineName) => {
@@ -180,9 +195,9 @@ function VMList({ cluster }) {
           <Tr>
             <Th>Name</Th>
             <Th>Status</Th>
-            <Th>CPU Cores</Th>
-            <Th>Memory (MB)</Th>
-            <Th>SSH Port</Th>
+            <Th>Resources</Th>
+            <Th>Network</Th>
+            <Th>Connections</Th>
             <Th>Actions</Th>
           </Tr>
         </Thead>
@@ -197,14 +212,102 @@ function VMList({ cluster }) {
                   {machine.status}
                 </Badge>
               </Td>
-              <Td>{machine.cpu_cores}</Td>
-              <Td>{machine.memory_mb}</Td>
               <Td>
-                {machine.status === 'running' && machine.ssh_port ? (
-                  <Badge colorScheme="blue">
-                    localhost:{machine.ssh_port}
-                  </Badge>
-                ) : '-'}
+                <VStack align="start" spacing={1}>
+                  <Text fontSize="sm">CPU: {machine.cpu_cores} cores</Text>
+                  <Text fontSize="sm">Memory: {machine.memory_mb} MB</Text>
+                </VStack>
+              </Td>
+              <Td>
+                <VStack align="start" spacing={1}>
+                  {machine.network_interfaces && Object.entries(machine.network_interfaces).map(([name, info]) => (
+                    <Box key={name} p={2} borderWidth="1px" borderRadius="md" width="100%">
+                      <Text fontSize="sm" fontWeight="bold" color="gray.600">
+                        {info.network_name}
+                      </Text>
+                      {info.private_ip && (
+                        <VStack align="start" spacing={0}>
+                          <HStack>
+                            <Text fontSize="sm" fontWeight="medium">Private IP:</Text>
+                            <Code fontSize="sm">{info.private_ip}</Code>
+                          </HStack>
+                          <Text fontSize="xs" color="gray.500">
+                            Subnet: {info.subnet_mask} • Gateway: {info.gateway}
+                          </Text>
+                        </VStack>
+                      )}
+                      {info.public_ip && (
+                        <VStack align="start" spacing={0}>
+                          <HStack>
+                            <Text fontSize="sm" fontWeight="medium">Public IP:</Text>
+                            <Code fontSize="sm">{info.public_ip}</Code>
+                          </HStack>
+                          <Text fontSize="xs" color="gray.500">
+                            Subnet: {info.subnet_mask} • Gateway: {info.gateway}
+                          </Text>
+                        </VStack>
+                      )}
+                      {info.mac && (
+                        <HStack>
+                          <Text fontSize="sm" fontWeight="medium">MAC:</Text>
+                          <Code fontSize="sm">{info.mac}</Code>
+                        </HStack>
+                      )}
+                      {info.forwarded_ports && info.forwarded_ports.map((port, idx) => (
+                        <Text key={idx} fontSize="xs" color="gray.600">
+                          Port forwarding: {port.guest_port} → {port.host_port}
+                        </Text>
+                      ))}
+                    </Box>
+                  ))}
+                </VStack>
+              </Td>
+              <Td>
+                {machine.status === 'running' && machine.connection_info && (
+                  <VStack align="start" spacing={2}>
+                    {machine.connection_info.public_ssh && (
+                      <HStack>
+                        <Text fontSize="sm" fontWeight="medium">Public:</Text>
+                        <Code fontSize="sm">{machine.connection_info.public_ssh}</Code>
+                        <IconButton
+                          aria-label="Copy public SSH command"
+                          icon={<CopyIcon />}
+                          size="sm"
+                          onClick={() => copyToClipboard(machine.connection_info.public_ssh)}
+                        />
+                      </HStack>
+                    )}
+                    {machine.connection_info.ssh && (
+                      <HStack>
+                        <Text fontSize="sm" fontWeight="medium">Local:</Text>
+                        <Code fontSize="sm">{machine.connection_info.ssh}</Code>
+                        <IconButton
+                          aria-label="Copy SSH command"
+                          icon={<CopyIcon />}
+                          size="sm"
+                          onClick={() => copyToClipboard(machine.connection_info.ssh)}
+                        />
+                      </HStack>
+                    )}
+                    {machine.connection_info.vnc && (
+                      <HStack>
+                        <Text fontSize="sm" fontWeight="medium">VNC:</Text>
+                        <Code fontSize="sm">{machine.connection_info.vnc}</Code>
+                        <IconButton
+                          aria-label="Copy VNC address"
+                          icon={<CopyIcon />}
+                          size="sm"
+                          onClick={() => copyToClipboard(machine.connection_info.vnc)}
+                        />
+                      </HStack>
+                    )}
+                  </VStack>
+                )}
+                {(!machine.status || machine.status !== 'running' || !machine.connection_info) && (
+                  <Text fontSize="sm" color="gray.500">
+                    Not available
+                  </Text>
+                )}
               </Td>
               <Td>
                 <HStack spacing={2}>

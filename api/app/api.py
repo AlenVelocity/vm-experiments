@@ -20,6 +20,8 @@ import traceback
 import logging
 import ipaddress
 import requests
+from eventlet import wsgi
+import eventlet.websocket
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +37,7 @@ from .vm import LibvirtManager
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=True, engineio_logger=True)
 
 vpc_manager = VPCManager()
 vm_manager = LibvirtManager()
@@ -46,94 +48,166 @@ console_sessions = {}
 class ConsoleSession:
     def __init__(self, vm_name):
         self.vm_name = vm_name
-        self.master_fd = None
-        self.slave_fd = None
-        self.process = None
+        self.domain = None
+        self.stream = None
         self.thread = None
         self.running = False
 
     def start(self, socket_id):
-        # Create PTY
-        self.master_fd, self.slave_fd = pty.openpty()
-        
-        # Set terminal size
-        term_size = struct.pack('HHHH', 24, 80, 0, 0)
-        fcntl.ioctl(self.slave_fd, termios.TIOCSWINSZ, term_size)
-        
-        # Start VM process
-        start_script = vm_manager.vm_dir / f"start-{self.vm_name}.sh"
-        if not start_script.exists():
-            raise Exception(f"VM {self.vm_name} not found")
+        try:
+            # Find the VM domain
+            vm = None
+            for vm_id, v in vm_manager.vms.items():
+                if v.name == self.vm_name:
+                    vm = v
+                    break
             
-        self.process = subprocess.Popen(
-            [str(start_script)],
-            stdin=self.slave_fd,
-            stdout=self.slave_fd,
-            stderr=self.slave_fd,
-            preexec_fn=os.setsid
-        )
-        
-        # Start read thread
-        self.running = True
-        self.thread = threading.Thread(target=self._read_output, args=(socket_id,))
-        self.thread.daemon = True
-        self.thread.start()
+            if not vm:
+                raise Exception(f"VM {self.vm_name} not found")
+            
+            # Get the domain
+            self.domain = vm_manager.conn.lookupByName(self.vm_name)
+            if not self.domain:
+                raise Exception(f"Domain {self.vm_name} not found")
+            
+            # Check if VM is running
+            if not self.domain.isActive():
+                raise Exception(f"VM {self.vm_name} is not running")
+            
+            # Open console stream
+            self.stream = self.domain.openConsole(None, 0)
+            if not self.stream:
+                raise Exception("Failed to open console stream")
+            
+            # Start read thread
+            self.running = True
+            self.thread = threading.Thread(target=self._read_output, args=(socket_id,))
+            self.thread.daemon = True
+            self.thread.start()
+            
+            logger.info(f"Console session started for VM {self.vm_name}")
+            
+        except Exception as e:
+            logger.error(f"Error starting console session: {str(e)}")
+            self.stop()
+            raise
 
     def _read_output(self, socket_id):
-        while self.running:
-            r, _, _ = select.select([self.master_fd], [], [], 0.1)
-            if r:
+        buffer = bytearray()
+        try:
+            while self.running and self.stream:
                 try:
-                    data = os.read(self.master_fd, 1024).decode()
-                    socketio.emit('output', data, room=socket_id)
-                except (OSError, IOError):
-                    break
+                    data = self.stream.recv(1024)
+                    if not data:
+                        break
+                    
+                    buffer.extend(data)
+                    
+                    # Try to decode complete UTF-8 sequences
+                    while buffer:
+                        try:
+                            text = buffer.decode('utf-8')
+                            socketio.emit('console.output', {'text': text}, room=socket_id)
+                            buffer.clear()
+                            break
+                        except UnicodeDecodeError:
+                            # If we can't decode, wait for more data
+                            if len(buffer) > 8192:  # Prevent buffer from growing too large
+                                buffer.clear()
+                            break
+                            
                 except Exception as e:
-                    print(f"Error reading from console: {e}")
+                    logger.error(f"Error reading console data: {str(e)}")
                     break
+                    
+        except Exception as e:
+            logger.error(f"Error in console read thread: {str(e)}")
+        finally:
+            self.stop()
+            socketio.emit('console.disconnected', {'reason': 'Console stream ended'}, room=socket_id)
 
     def write_input(self, data):
-        if self.master_fd:
-            os.write(self.master_fd, data.encode())
+        try:
+            if self.stream and self.running:
+                self.stream.send(data.encode())
+        except Exception as e:
+            logger.error(f"Error writing to console: {str(e)}")
+            self.stop()
 
     def stop(self):
         self.running = False
-        if self.process:
-            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-            self.process = None
-        if self.master_fd:
-            os.close(self.master_fd)
-        if self.slave_fd:
-            os.close(self.slave_fd)
-        if self.thread:
-            self.thread.join()
+        if self.stream:
+            try:
+                self.stream.finish()
+            except:
+                pass
+            self.stream = None
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        self.domain = None
 
 @socketio.on('connect')
 def handle_connect():
-    vm_name = request.args.get('vmName')
-    if not vm_name:
-        disconnect()
-        return
-    
     try:
+        vm_name = request.args.get('vmName')
+        if not vm_name:
+            logger.error("No VM name provided in connection request")
+            return False
+        
+        logger.info(f"Client connecting for VM: {vm_name}")
+        return True
+    except Exception as e:
+        logger.error(f"Error in connect handler: {str(e)}")
+        return False
+
+@socketio.on('console.connect')
+def handle_console_connect(data):
+    try:
+        vm_name = data.get('vmName')
+        if not vm_name:
+            raise Exception("VM name is required")
+        
+        logger.info(f"Starting console session for VM: {vm_name}")
+        
+        # Check if there's an existing session
+        old_session = console_sessions.get(request.sid)
+        if old_session:
+            old_session.stop()
+        
         session = ConsoleSession(vm_name)
         console_sessions[request.sid] = session
         session.start(request.sid)
+        
+        emit('console.connected', {'vmName': vm_name})
+        
     except Exception as e:
-        print(f"Error starting console session: {e}")
-        disconnect()
+        error_msg = str(e)
+        logger.error(f"Error in console connect: {error_msg}")
+        emit('console.error', {'error': error_msg})
+        return False
 
-@socketio.on('input')
-def handle_input(data):
-    session = console_sessions.get(request.sid)
-    if session:
-        session.write_input(data)
+@socketio.on('console.input')
+def handle_console_input(data):
+    try:
+        session = console_sessions.get(request.sid)
+        if session and isinstance(data, dict):
+            text = data.get('text', '')
+            if text:
+                logger.debug(f"Sending console input: {len(text)} bytes")
+                session.write_input(text)
+    except Exception as e:
+        logger.error(f"Error in console input: {str(e)}")
+        emit('console.error', {'error': str(e)})
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    session = console_sessions.pop(request.sid, None)
-    if session:
-        session.stop()
+    try:
+        session = console_sessions.pop(request.sid, None)
+        if session:
+            logger.info(f"Cleaning up console session for client: {request.sid}")
+            session.stop()
+    except Exception as e:
+        logger.error(f"Error in disconnect handler: {str(e)}")
 
 # VPC Routes
 @app.route('/api/vpc/list', methods=['GET'])
@@ -978,4 +1052,14 @@ def update_disk_performance(cluster, disk):
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False) 
+    # Use eventlet's WSGI server
+    logger.info("Starting server with eventlet WebSocket support...")
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=5000,
+        debug=True,
+        use_reloader=False,
+        log_output=True,
+        websocket=True
+    ) 

@@ -30,7 +30,8 @@ class VM:
 
 class LibvirtManager:
     def __init__(self):
-        self.vm_dir = Path("vms")
+        # Use absolute path for VM directory
+        self.vm_dir = Path.home() / "vm-experiments" / "vms"
         self.vm_dir.mkdir(parents=True, exist_ok=True)
         self.network_manager = NetworkManager()
         
@@ -137,32 +138,157 @@ class LibvirtManager:
         
         os = ET.SubElement(domain, 'os')
         ET.SubElement(os, 'type', arch='aarch64', machine='virt').text = 'hvm'
-        ET.SubElement(os, 'loader', readonly='yes', type='pflash').text = '/opt/homebrew/share/qemu/edk2-aarch64-code.fd'
-        ET.SubElement(os, 'nvram').text = '/opt/homebrew/share/qemu/edk2-arm-vars.fd'
         ET.SubElement(os, 'boot', dev='hd')
         
+        features = ET.SubElement(domain, 'features')
+        ET.SubElement(features, 'gic', version='3')
+        ET.SubElement(features, 'acpi')
+        
+        # Use custom CPU mode with cortex-a72 model for ARM64
         cpu = ET.SubElement(domain, 'cpu', mode='custom')
         ET.SubElement(cpu, 'model', fallback='allow').text = 'cortex-a72'
+        topology = ET.SubElement(cpu, 'topology', sockets='1', cores=str(vm.config.cpu_cores), threads='1')
         
         devices = ET.SubElement(domain, 'devices')
+        
+        # Add emulator
         ET.SubElement(devices, 'emulator').text = '/opt/homebrew/bin/qemu-system-aarch64'
         
+        # Main disk
         disk = ET.SubElement(devices, 'disk', type='file', device='disk')
         ET.SubElement(disk, 'driver', name='qemu', type='qcow2')
         ET.SubElement(disk, 'source', file=str(disk_path))
         ET.SubElement(disk, 'target', dev='vda', bus='virtio')
         
-        interface = ET.SubElement(devices, 'interface', type='user')
-        ET.SubElement(interface, 'model', type='virtio')
-        ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
+        # Cloud-init disk
+        cloud_init_disk = ET.SubElement(devices, 'disk', type='file', device='cdrom')
+        ET.SubElement(cloud_init_disk, 'driver', name='qemu', type='raw')
+        ET.SubElement(cloud_init_disk, 'source', file=str(self.vm_dir / f"{vm.name}-cloud-init.iso"))
+        ET.SubElement(cloud_init_disk, 'target', dev='sda', bus='sata')
+        ET.SubElement(cloud_init_disk, 'readonly')
+        
+        # Add virtio-serial for console
+        serial = ET.SubElement(devices, 'serial', type='pty')
+        ET.SubElement(serial, 'target', type='system-serial', port='0')
         
         console = ET.SubElement(devices, 'console', type='pty')
         ET.SubElement(console, 'target', type='serial', port='0')
         
-        serial = ET.SubElement(devices, 'serial', type='pty')
-        ET.SubElement(serial, 'target', port='0')
+        # Add VNC display
+        graphics = ET.SubElement(devices, 'graphics', type='vnc', port='-1', autoport='yes', listen='0.0.0.0')
+        ET.SubElement(graphics, 'listen', type='address', address='0.0.0.0')
+        
+        # Add video device
+        video = ET.SubElement(devices, 'video')
+        ET.SubElement(video, 'model', type='virtio', heads='1')
+        
+        # Add network interface with SSH port forwarding
+        interface = ET.SubElement(devices, 'interface', type='user')
+        ET.SubElement(interface, 'model', type='virtio')
+        hostfwd = ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
+        
+        # Add QEMU guest agent channel
+        channel = ET.SubElement(devices, 'channel', type='unix')
+        ET.SubElement(channel, 'target', type='virtio', name='org.qemu.guest_agent.0')
         
         return ET.tostring(domain, encoding='unicode')
+
+    def _create_cloud_init_config(self, vm: VM) -> None:
+        cloud_init_dir = self.vm_dir / vm.id / "cloud-init"
+        cloud_init_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get user's SSH public key
+        ssh_key_path = Path.home() / '.ssh' / 'id_rsa.pub'
+        if not ssh_key_path.exists():
+            subprocess.run(['ssh-keygen', '-t', 'rsa', '-N', '', '-f', 
+                          str(ssh_key_path).replace('.pub', '')], check=True)
+        
+        ssh_key = ssh_key_path.read_text().strip()
+
+        # Create user-data
+        user_data = f"""#cloud-config
+hostname: {vm.name}
+fqdn: {vm.name}.local
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: users, admin
+    shell: /bin/bash
+    lock_passwd: false
+    # Password is 'ubuntu'
+    passwd: $6$rounds=4096$saltsalt$NQ.HoH98E3nIxwh6nUBcQgwXrfHqycWYeXGpM6WAw6RQCLqmVoqc7yBz5Yk0lmBmcJpZxPxhqB2.Ua0PKgBE0/
+    ssh_authorized_keys:
+      - {ssh_key}
+
+ssh_pwauth: true
+ssh_deletekeys: false
+ssh_genkeytypes: ['rsa', 'ecdsa', 'ed25519']
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - qemu-guest-agent
+  - openssh-server
+  - cloud-init
+  - net-tools
+
+write_files:
+  - path: /etc/ssh/sshd_config
+    content: |
+      Port 22
+      ListenAddress 0.0.0.0
+      PermitRootLogin no
+      PubkeyAuthentication yes
+      PasswordAuthentication yes
+      ChallengeResponseAuthentication no
+      UsePAM yes
+      X11Forwarding yes
+      PrintMotd no
+      AcceptEnv LANG LC_*
+      Subsystem sftp /usr/lib/openssh/sftp-server
+
+runcmd:
+  - systemctl enable ssh
+  - systemctl start ssh
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  - netplan apply
+
+power_state:
+  mode: reboot
+  timeout: 300
+  condition: true"""
+
+        # Create meta-data
+        meta_data = f"""instance-id: {vm.id}
+local-hostname: {vm.name}"""
+
+        # Create network-config
+        network_config = f"""version: 2
+ethernets:
+  eth0:
+    dhcp4: true
+    optional: true"""
+
+        # Write the files
+        (cloud_init_dir / "user-data").write_text(user_data)
+        (cloud_init_dir / "meta-data").write_text(meta_data)
+        (cloud_init_dir / "network-config").write_text(network_config)
+
+        # Create the cloud-init ISO
+        subprocess.run([
+            'mkisofs',
+            '-output', str(self.vm_dir / f"{vm.name}-cloud-init.iso"),
+            '-volid', 'cidata',
+            '-joliet',
+            '-rock',
+            '-input-charset', 'utf-8',
+            str(cloud_init_dir / "user-data"),
+            str(cloud_init_dir / "meta-data"),
+            str(cloud_init_dir / "network-config")
+        ], check=True)
 
     def create_vm(self, name: str, vpc_name: str) -> VM:
         vm_id = str(uuid.uuid4())
@@ -172,6 +298,28 @@ class LibvirtManager:
         vm_path.mkdir(parents=True, exist_ok=True)
         vm.ssh_port = self._find_free_port()
 
+        # Generate unique network information
+        vm_number = int(vm_id[-4:], 16) % 254  # Use last 4 chars of UUID as hex number
+        subnet = (vm_number // 254) + 1  # Increment subnet for each 254 VMs
+        host = (vm_number % 254) + 1     # Host number 1-254 within subnet
+
+        # Create network information
+        vm.network_info = {
+            'private': {
+                'ip': f"192.168.{subnet}.{host}",
+                'subnet_mask': "255.255.255.0",
+                'gateway': f"192.168.{subnet}.1",
+                'network_name': f"{vpc_name}-private"
+            },
+            'public': {
+                'ip': f"10.{subnet}.{host}.2",
+                'subnet_mask': "255.255.255.0",
+                'gateway': f"10.{subnet}.{host}.1",
+                'network_name': f"{vpc_name}-public"
+            }
+        }
+
+        # Save VM configuration
         with open(vm_path / "config.json", "w") as f:
             config_dict = {
                 "name": config.name,
@@ -179,15 +327,30 @@ class LibvirtManager:
                 "memory_mb": config.memory_mb,
                 "disk_size_gb": config.disk_size_gb,
                 "network_name": config.network_name,
-                "ssh_port": vm.ssh_port
+                "ssh_port": vm.ssh_port,
+                "network_info": vm.network_info
             }
             json.dump(config_dict, f)
 
         try:
+            # Create cloud-init configuration
+            self._create_cloud_init_config(vm)
+
             pool = self.conn.storagePoolLookupByName('default')
+            
+            # Generate a unique volume name
+            volume_name = f"{name}-{vm_id[:8]}.qcow2"
+            
+            # Check if volume exists and delete it if it does
+            try:
+                old_volume = pool.storageVolLookupByName(volume_name)
+                old_volume.delete(0)
+            except libvirt.libvirtError:
+                pass  # Volume doesn't exist, which is fine
+            
             vol_xml = f"""
             <volume type='file'>
-                <name>{name}.qcow2</name>
+                <name>{volume_name}</name>
                 <capacity unit='G'>{config.disk_size_gb}</capacity>
                 <target>
                     <format type='qcow2'/>
@@ -206,7 +369,7 @@ class LibvirtManager:
             self.vms[vm_id] = vm
             return vm
             
-        except libvirt.libvirtError as e:
+        except Exception as e:
             if vm_path.exists():
                 shutil.rmtree(vm_path)
             raise Exception(f"Failed to create VM: {str(e)}")
@@ -220,9 +383,177 @@ class LibvirtManager:
             domain = self.conn.lookupByName(vm.name)
             if domain.isActive():
                 return True
-            domain.create()
+
+            # Create and clean up the VM directory
+            script_dir = self.vm_dir / vm_id
+            script_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Clean up any stale files
+            for file in ["qemu.pid", "disk.qcow2", "qemu.log"]:
+                file_path = script_dir / file
+                try:
+                    if file_path.exists():
+                        file_path.unlink()
+                except Exception as e:
+                    print(f"Warning: Failed to remove {file}: {str(e)}")
+
+            # Get the domain XML
+            xml = domain.XMLDesc()
+            root = ET.fromstring(xml)
+            
+            # Extract disk path
+            disk_elem = root.find('.//disk[@device="disk"]/source')
+            if disk_elem is None:
+                raise Exception("Could not find disk path in domain XML")
+            disk_path = disk_elem.get('file')
+            
+            if not Path(disk_path).exists():
+                raise Exception(f"Source disk not found: {disk_path}")
+            
+            # Extract memory and CPU info
+            memory_mb = int(root.find('.//memory').text) // 1024
+            vcpus = root.find('.//vcpu').text
+            
+            # Find a free VNC port
+            vnc_port = self._find_free_port(5900)
+            vnc_display = vnc_port - 5900
+            
+            # Build QEMU command
+            qemu_cmd = [
+                '/opt/homebrew/bin/qemu-system-aarch64',
+                '-M', 'virt',
+                '-cpu', 'cortex-a72',
+                '-accel', 'hvf',
+                '-smp', vcpus,
+                '-m', str(memory_mb),
+                # Main disk
+                '-drive', f'file={disk_path},if=virtio,format=qcow2',
+                # Cloud-init disk
+                '-drive', f'file={self.vm_dir / f"{vm.name}-cloud-init.iso"},if=virtio,format=raw,media=cdrom',
+                # Network with SSH port forwarding
+                '-device', 'virtio-net-pci,netdev=net0',
+                '-netdev', f'user,id=net0,hostfwd=tcp::{vm.ssh_port}-:22',
+                # VNC
+                '-vnc', f':{vnc_display}',
+                '-display', 'default,show-cursor=on',
+                # Devices
+                '-device', 'virtio-gpu-pci',
+                '-device', 'qemu-xhci',
+                '-device', 'usb-kbd',
+                '-device', 'usb-tablet',
+                # QEMU guest agent
+                '-chardev', 'socket,path=/tmp/qga.sock,server=on,wait=off,id=qga0',
+                '-device', 'virtio-serial',
+                '-device', 'virtserialport,chardev=qga0,name=org.qemu.guest_agent.0',
+                # Logging and monitoring
+                '-pidfile', str(script_dir / "qemu.pid"),
+                '-D', str(script_dir / "qemu.log"),
+                '-d', 'guest_errors,unimp',
+                '-serial', 'mon:stdio'
+            ]
+            
+            # Create the start script
+            with open(script_dir / "start_vm.sh", "w") as f:
+                f.write(f"""#!/bin/bash
+cd "{script_dir}"
+
+# Verify disk exists
+if [ ! -f "{disk_path}" ]; then
+    echo "Error: Disk file not found at {disk_path}"
+    exit 1
+fi
+
+# Clean up any stale files
+rm -f qemu.pid
+
+echo "Starting QEMU VM..."
+echo "Log file: {script_dir}/qemu.log"
+echo "PID file: {script_dir}/qemu.pid"
+echo "VNC port: {vnc_port} (display :{vnc_display})"
+echo "SSH port: {vm.ssh_port} (use: ssh -p {vm.ssh_port} ubuntu@localhost)"
+echo "Default password: ubuntu"
+echo "Network Information:"
+echo "  Private IP: {vm.network_info['private']['ip']}"
+echo "  Public IP:  {vm.network_info['public']['ip']}"
+echo "----------------------------------------"
+
+# Start QEMU and save its PID
+{' '.join(qemu_cmd)} 2>&1 | tee -a qemu.log
+""")
+            
+            # Create a monitor script
+            with open(script_dir / "monitor_vm.sh", "w") as f:
+                f.write(f"""#!/bin/bash
+cd "{script_dir}"
+
+# Wait for QEMU to start and create PID file
+sleep 2
+if [ -f "qemu.pid" ]; then
+    pid=$(cat qemu.pid)
+    echo "QEMU process started with PID: $pid"
+    
+    # Wait for SSH to become available
+    echo "Waiting for SSH to become available..."
+    for i in $(seq 1 30); do
+        if nc -z localhost {vm.ssh_port} 2>/dev/null; then
+            echo "SSH is now available on port {vm.ssh_port}"
+            break
+        fi
+        sleep 2
+    done
+    
+    # Monitor the QEMU process
+    while kill -0 $pid 2>/dev/null; do
+        sleep 5
+    done
+    echo "QEMU process terminated"
+fi
+
+# Clean up files
+rm -f qemu.pid disk.qcow2 qemu.log
+""")
+            
+            # Make scripts executable
+            script_path = script_dir / "start_vm.sh"
+            monitor_script_path = script_dir / "monitor_vm.sh"
+            script_path.chmod(0o755)
+            monitor_script_path.chmod(0o755)
+            
+            # Open a new terminal window and run the VM
+            terminal_cmd = [
+                'osascript',
+                '-e', 'tell application "Terminal"',
+                '-e', f'do script "clear; echo \\"Starting VM {vm.name}...\\"; {script_path}"',
+                '-e', 'end tell'
+            ]
+            subprocess.Popen(terminal_cmd)
+            
+            # Run the monitor script in the background
+            subprocess.Popen([str(monitor_script_path)], 
+                           stdout=subprocess.DEVNULL, 
+                           stderr=subprocess.DEVNULL)
+            
+            print(f"""
+VM {vm.name} is starting...
+SSH access will be available at:
+  ssh -p {vm.ssh_port} ubuntu@localhost
+Default password: ubuntu
+
+VNC access available at:
+  localhost:{vnc_port} (display :{vnc_display})
+""")
             return True
-        except libvirt.libvirtError as e:
+            
+        except Exception as e:
+            # Clean up any temporary files if there was an error
+            try:
+                script_dir = self.vm_dir / vm_id
+                for file in ["qemu.pid", "disk.qcow2", "qemu.log"]:
+                    file_path = script_dir / file
+                    if file_path.exists():
+                        file_path.unlink()
+            except:
+                pass
             raise Exception(f"Failed to start VM: {str(e)}")
 
     def stop_vm(self, vm_id: str) -> bool:
@@ -283,8 +614,82 @@ class LibvirtManager:
         try:
             domain = self.conn.lookupByName(vm.name)
             state, reason = domain.state()
+            
+            # Check if QEMU is actually running
+            pid_file = self.vm_dir / vm_id / "qemu.pid"
+            if pid_file.exists():
+                try:
+                    with open(pid_file) as f:
+                        pid = int(f.read().strip())
+                    # Check if process is running
+                    os.kill(pid, 0)
+                    # If we get here, process is running
+                    state = libvirt.VIR_DOMAIN_RUNNING
+                except (OSError, ValueError):
+                    # Process is not running
+                    state = libvirt.VIR_DOMAIN_SHUTOFF
+                    if pid_file.exists():
+                        pid_file.unlink()
+            
             info = domain.info()
             memory_kb = info[2]
+            
+            # Get VNC port if available
+            vnc_port = None
+            network_info = {}
+            
+            if state == libvirt.VIR_DOMAIN_RUNNING:
+                xml = domain.XMLDesc()
+                root = ET.fromstring(xml)
+                
+                # Get VNC port
+                graphics = root.find('.//graphics[@type="vnc"]')
+                if graphics is not None:
+                    vnc_port = graphics.get('port')
+                
+                # Get network interfaces and use stored network info
+                interfaces = root.findall('.//interface')
+                for idx, iface in enumerate(interfaces):
+                    net_info = {
+                        'type': iface.get('type'),
+                        'model': iface.find('model').get('type') if iface.find('model') is not None else None,
+                    }
+                    
+                    # Get MAC address
+                    mac = iface.find('mac')
+                    if mac is not None:
+                        net_info['mac'] = mac.get('address')
+                    
+                    # Get forwarded ports
+                    forwards = iface.findall('hostfwd')
+                    if forwards:
+                        net_info['forwarded_ports'] = []
+                        for fwd in forwards:
+                            net_info['forwarded_ports'].append({
+                                'protocol': fwd.get('protocol'),
+                                'host_port': fwd.get('port'),
+                                'guest_port': fwd.get('to')
+                            })
+                    
+                    # Use stored network information
+                    if idx == 0 and vm.network_info:  # Private network
+                        private_info = vm.network_info['private']
+                        net_info.update({
+                            'private_ip': private_info['ip'],
+                            'network_name': private_info['network_name'],
+                            'subnet_mask': private_info['subnet_mask'],
+                            'gateway': private_info['gateway']
+                        })
+                    elif idx == 1 and vm.network_info:  # Public network
+                        public_info = vm.network_info['public']
+                        net_info.update({
+                            'public_ip': public_info['ip'],
+                            'network_name': public_info['network_name'],
+                            'subnet_mask': public_info['subnet_mask'],
+                            'gateway': public_info['gateway']
+                        })
+                    
+                    network_info[f'net{idx}'] = net_info
             
             status = {
                 "name": vm.name,
@@ -292,8 +697,18 @@ class LibvirtManager:
                 "memory_mb": memory_kb // 1024,
                 "cpu_cores": info[3],
                 "network": vm.config.network_name,
-                "ssh_port": vm.ssh_port
+                "ssh_port": vm.ssh_port,
+                "vnc_port": vnc_port,
+                "network_interfaces": network_info,
+                "connection_info": {
+                    "ssh": f"ssh -p {vm.ssh_port} ubuntu@localhost",
+                    "vnc": f"localhost:{vnc_port}" if vnc_port else None
+                }
             }
+            
+            # Add public IP to connection info when running
+            if state == libvirt.VIR_DOMAIN_RUNNING and vm.network_info and 'public' in vm.network_info:
+                status["connection_info"]["public_ssh"] = f"ssh ubuntu@{vm.network_info['public']['ip']}"
             
             if state == libvirt.VIR_DOMAIN_RUNNING:
                 cpu_stats = domain.getCPUStats(True)
