@@ -1280,6 +1280,73 @@ def list_vm_disks(vm_name):
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/clusters/<cluster>/machines/<machine>/snapshots/multi', methods=['POST'])
+def create_multi_volume_snapshot(cluster, machine):
+    """Create a snapshot of all volumes attached to a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        data = request.json
+        name = data.get('name')
+        description = data.get('description', '')
+        
+        if not name:
+            return jsonify({'error': 'Snapshot name is required'}), 400
+            
+        success = vm_manager.create_snapshot(vm.id, name, description)
+        if success:
+            return jsonify({'message': f'Multi-volume snapshot {name} created successfully'})
+        return jsonify({'error': 'Failed to create multi-volume snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error creating multi-volume snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/snapshots/incremental', methods=['POST'])
+def create_incremental_snapshot(cluster, machine):
+    """Create an incremental snapshot that only stores changes since the parent snapshot"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        data = request.json
+        name = data.get('name')
+        parent_snapshot = data.get('parent_snapshot')
+        description = data.get('description', '')
+        
+        if not name:
+            return jsonify({'error': 'Snapshot name is required'}), 400
+            
+        success = vm_manager.create_incremental_snapshot(vm.id, name, parent_snapshot, description)
+        if success:
+            return jsonify({'message': f'Incremental snapshot {name} created successfully'})
+        return jsonify({'error': 'Failed to create incremental snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error creating incremental snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     # Use eventlet's WSGI server
     logger.info("Starting server with eventlet WebSocket support...")

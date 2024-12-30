@@ -699,13 +699,41 @@ VNC access available at:
 
         try:
             domain = self.conn.lookupByName(vm.name)
+            
+            # Get all attached disks
+            xml = domain.XMLDesc()
+            root = ET.fromstring(xml)
+            disks = root.findall('.//disk[@device="disk"]')
+            
+            # Prepare snapshot XML with all disks
             snapshot_xml = f"""
             <domainsnapshot>
                 <name>{name}</name>
                 <description>{description}</description>
+                <disks>
+            """
+            
+            # Add each disk to the snapshot
+            for disk in disks:
+                target = disk.find('target')
+                if target is not None:
+                    dev = target.get('dev')
+                    snapshot_xml += f"""
+                    <disk name='{dev}'>
+                        <source/>
+                    </disk>
+                    """
+            
+            snapshot_xml += """
+                </disks>
             </domainsnapshot>
             """
-            snapshot = domain.snapshotCreateXML(snapshot_xml)
+            
+            # Create snapshot with flags for disk snapshot
+            flags = (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY |
+                    libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_ATOMIC)
+            snapshot = domain.snapshotCreateXML(snapshot_xml, flags)
+            
             return bool(snapshot)
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to create snapshot: {str(e)}")
@@ -860,3 +888,60 @@ VNC access available at:
     def get_machine_disks(self, vm_name: str) -> List[dict]:
         """Get all disks attached to a VM."""
         return self.disk_manager.get_machine_disks(vm_name)
+
+    def create_incremental_snapshot(self, vm_id: str, name: str, parent_snapshot: str = None, description: str = "") -> bool:
+        """Create an incremental snapshot that only stores changes since the parent snapshot."""
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return False
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            
+            # Get all attached disks
+            xml = domain.XMLDesc()
+            root = ET.fromstring(xml)
+            disks = root.findall('.//disk[@device="disk"]')
+            
+            # Prepare snapshot XML with all disks
+            snapshot_xml = f"""
+            <domainsnapshot>
+                <name>{name}</name>
+                <description>{description}</description>
+                <parent>
+                    <name>{parent_snapshot}</name>
+                </parent>
+                <disks>
+            """
+            
+            # Add each disk to the snapshot with incremental backup
+            for disk in disks:
+                target = disk.find('target')
+                if target is not None:
+                    dev = target.get('dev')
+                    snapshot_xml += f"""
+                    <disk name='{dev}' snapshot='external'>
+                        <driver type='qcow2'/>
+                        <source/>
+                    </disk>
+                    """
+            
+            snapshot_xml += """
+                </disks>
+            </domainsnapshot>
+            """
+            
+            # Create snapshot with flags for incremental backup
+            flags = (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY |
+                    libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_REUSE_EXT)
+            
+            if parent_snapshot:
+                parent = domain.snapshotLookupByName(parent_snapshot)
+                if not parent:
+                    raise Exception(f"Parent snapshot {parent_snapshot} not found")
+            
+            snapshot = domain.snapshotCreateXML(snapshot_xml, flags)
+            return bool(snapshot)
+            
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to create incremental snapshot: {str(e)}")
