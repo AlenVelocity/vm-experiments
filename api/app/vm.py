@@ -1,18 +1,26 @@
+import os
+import sys
 import subprocess
+import shutil
+import time
 import json
+import logging
+import ipaddress
+import requests
+import uuid
+import socket
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-import shutil
 from dataclasses import dataclass
-import uuid
-import os
-import socket
-import time
 import libvirt
 import xml.etree.ElementTree as ET
-from .networking import NetworkManager, NetworkType
-from .ip_manager import IPManager
-from .disk_manager import DiskManager
+from networking import NetworkManager, NetworkType
+from ip_manager import IPManager
+from disk_manager import DiskManager
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class VMConfig:
@@ -33,37 +41,28 @@ class VM:
 
 class LibvirtManager:
     def __init__(self):
-        # Use absolute path for VM directory
-        self.vm_dir = Path.home() / "vm-experiments" / "vms"
-        self.vm_dir.mkdir(parents=True, exist_ok=True)
-        self.network_manager = NetworkManager()
-        self.ip_manager = IPManager()
-        self.disk_manager = DiskManager(self.conn)
-        
-        # Try different connection methods
-        connection_uris = [
-            'qemu+unix:///system?socket=/opt/homebrew/var/run/libvirt/libvirt-sock',
-            'qemu:///system',
-            'qemu:///session'
-        ]
-        
-        last_error = None
-        for uri in connection_uris:
-            try:
-                self.conn = libvirt.open(uri)
-                if self.conn:
-                    print(f"Successfully connected to libvirt using {uri}")
-                    break
-            except libvirt.libvirtError as e:
-                last_error = e
-                print(f"Failed to connect using {uri}: {str(e)}")
-                continue
-        
-        if not self.conn:
-            raise Exception(f'Failed to connect to libvirt: {str(last_error)}')
+        try:
+            # For M1 Macs, we need to use the session URI instead of system
+            self.conn = libvirt.open('qemu:///session')
+            if not self.conn:
+                raise Exception("Failed to open connection to qemu:///session")
             
-        self._init_storage_pool()
-        self.vms: Dict[str, VM] = self._load_vms()
+            self.vm_dir = Path(__file__).parent.parent / "vms"
+            self.vm_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Initialize storage pool first
+            self._init_storage_pool()
+            
+            self.network_manager = NetworkManager(self.conn)
+            self.ip_manager = IPManager()
+            self.disk_manager = DiskManager(self.conn)
+            
+            self.vms = {}  # Dictionary to store VM instances
+            
+            logger.info("LibvirtManager initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize LibvirtManager: {str(e)}")
+            raise
 
     def __del__(self):
         if hasattr(self, 'conn'):
@@ -73,27 +72,42 @@ class LibvirtManager:
                 pass
 
     def _init_storage_pool(self):
+        """Initialize the default storage pool for QEMU/KVM"""
         try:
+            # Try to find existing pool
             pool = self.conn.storagePoolLookupByName('default')
+            if not pool.isActive():
+                pool.create()
+            return pool
         except libvirt.libvirtError:
+            # Create pool directory in user's home directory for session mode
             pool_path = Path.home() / '.local/share/libvirt/images'
             pool_path.mkdir(parents=True, exist_ok=True)
             
+            # Define pool XML
             pool_xml = f"""
             <pool type='dir'>
                 <name>default</name>
                 <target>
-                    <path>{pool_path}</path>
+                    <path>{str(pool_path)}</path>
+                    <permissions>
+                        <mode>0755</mode>
+                    </permissions>
                 </target>
             </pool>
             """
+            
+            # Create the pool
             pool = self.conn.storagePoolDefineXML(pool_xml)
             if not pool:
                 raise Exception("Failed to create storage pool")
             
+            # Start the pool
             pool.setAutostart(True)
-            if not pool.isActive():
-                pool.create()
+            pool.create()
+            
+            logger.info(f"Created default storage pool at {pool_path}")
+            return pool
 
     def _load_vms(self) -> Dict[str, VM]:
         vms = {}
@@ -133,30 +147,40 @@ class LibvirtManager:
         raise Exception("No free ports available")
 
     def _generate_domain_xml(self, vm: VM, disk_path: Path) -> str:
-        domain = ET.Element('domain', type='qemu')
-        ET.SubElement(domain, 'name').text = vm.name
-        ET.SubElement(domain, 'uuid').text = vm.id
-        ET.SubElement(domain, 'memory', unit='MiB').text = str(vm.config.memory_mb)
-        ET.SubElement(domain, 'currentMemory', unit='MiB').text = str(vm.config.memory_mb)
-        vcpu = ET.SubElement(domain, 'vcpu', placement='static')
-        vcpu.text = str(vm.config.cpu_cores)
+        """Generate libvirt domain XML for the VM."""
+        root = ET.Element('domain', type='qemu')  # Use QEMU directly for M1
         
-        os = ET.SubElement(domain, 'os')
+        # Basic metadata
+        ET.SubElement(root, 'name').text = vm.name
+        ET.SubElement(root, 'uuid').text = vm.id
+        ET.SubElement(root, 'title').text = f"VM {vm.name}"
+        
+        # Use aarch64 for M1
+        os = ET.SubElement(root, 'os')
         ET.SubElement(os, 'type', arch='aarch64', machine='virt').text = 'hvm'
         ET.SubElement(os, 'boot', dev='hd')
         
-        features = ET.SubElement(domain, 'features')
-        ET.SubElement(features, 'gic', version='3')
+        # Memory and CPU configuration
+        memory_kb = vm.config.memory_mb * 1024
+        ET.SubElement(root, 'memory', unit='KiB').text = str(memory_kb)
+        ET.SubElement(root, 'currentMemory', unit='KiB').text = str(memory_kb)
+        
+        vcpu = ET.SubElement(root, 'vcpu', placement='static')
+        vcpu.text = str(vm.config.cpu_cores)
+        
+        # CPU configuration for M1
+        cpu = ET.SubElement(root, 'cpu', mode='host-passthrough')
+        ET.SubElement(cpu, 'topology', sockets='1', cores=str(vm.config.cpu_cores), threads='1')
+        
+        # Features
+        features = ET.SubElement(root, 'features')
         ET.SubElement(features, 'acpi')
+        ET.SubElement(features, 'gic', version='3')
         
-        # Use custom CPU mode with cortex-a72 model for ARM64
-        cpu = ET.SubElement(domain, 'cpu', mode='custom')
-        ET.SubElement(cpu, 'model', fallback='allow').text = 'cortex-a72'
-        topology = ET.SubElement(cpu, 'topology', sockets='1', cores=str(vm.config.cpu_cores), threads='1')
+        # Devices
+        devices = ET.SubElement(root, 'devices')
         
-        devices = ET.SubElement(domain, 'devices')
-        
-        # Add emulator
+        # Emulator
         ET.SubElement(devices, 'emulator').text = '/opt/homebrew/bin/qemu-system-aarch64'
         
         # Main disk
@@ -169,7 +193,7 @@ class LibvirtManager:
         cloud_init_disk = ET.SubElement(devices, 'disk', type='file', device='cdrom')
         ET.SubElement(cloud_init_disk, 'driver', name='qemu', type='raw')
         ET.SubElement(cloud_init_disk, 'source', file=str(self.vm_dir / f"{vm.name}-cloud-init.iso"))
-        ET.SubElement(cloud_init_disk, 'target', dev='sda', bus='sata')
+        ET.SubElement(cloud_init_disk, 'target', dev='sda', bus='usb')  # Use USB for CDROM on ARM64
         ET.SubElement(cloud_init_disk, 'readonly')
         
         # Add virtio-serial for console
@@ -190,82 +214,81 @@ class LibvirtManager:
         # Add network interface with SSH port forwarding
         interface = ET.SubElement(devices, 'interface', type='user')
         ET.SubElement(interface, 'model', type='virtio')
-        hostfwd = ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
+        ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
         
-        # Add QEMU guest agent channel
-        channel = ET.SubElement(devices, 'channel', type='unix')
-        ET.SubElement(channel, 'target', type='virtio', name='org.qemu.guest_agent.0')
-        
-        return ET.tostring(domain, encoding='unicode')
+        return ET.tostring(root, encoding='unicode', pretty_print=True)
 
     def _create_cloud_init_config(self, vm: VM) -> None:
-        cloud_init_dir = self.vm_dir / "cloud-init"
-        cloud_init_dir.mkdir(parents=True, exist_ok=True)
-
-        # Start with default cloud-init config
-        user_data = {
-            "users": [{
-                "name": "ubuntu",
-                "sudo": "ALL=(ALL) NOPASSWD:ALL",
-                "shell": "/bin/bash",
-                "ssh_authorized_keys": [
-                    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0WGP1EZykEtv5YGC9nMiPFW3U3DmZNzKFO5nEu6uozEHh4jLZzPNHSrw1BEQzzeQqwDPDHSFWqk0wF7HSLch+VHtcDyCqJpwRzxqz+YkHk7jm8HRJ4zN0o5W4jF+5lxMmBOWkqVv2U2K8DcwzqX5Qed3u7GZDM7kEKVeJtqk7/ayGRHvHmW2yCxKIyZQQErUkKmXCRvUG6zrHGGsxqQJlICh9UJyxkZM8JkYu8C4RjX9JGo+xKlxNCvGnLGz+LlPMY6qqhV+bDnCP+1v2IkCSxKRFGGW5EQlP4i8l77h/jL4CEoatP3XTLWNae+v9LvrFzUVz3JoFVvmmdFql"
-                ]
-            }],
-            "write_files": [{
-                "path": "/etc/netplan/50-cloud-init.yaml",
-                "content": {
-                    "network": {
-                        "version": 2,
-                        "ethernets": {
-                            "eth0": {
-                                "dhcp4": False,
-                                "addresses": [f"{vm.network_info['private']['ip']}/24"],
-                                "gateway4": vm.network_info['private']['gateway'],
-                                "nameservers": {"addresses": ["8.8.8.8", "8.8.4.4"]}
-                            }
-                        }
-                    }
-                }
-            }]
-        }
-
-        # Add public network configuration if available
-        if 'public' in vm.network_info:
-            user_data["write_files"][0]["content"]["network"]["ethernets"]["eth1"] = {
-                "dhcp4": False,
-                "addresses": [f"{vm.network_info['public']['ip']}/24"],
-                "gateway4": vm.network_info['public']['gateway'],
-                "nameservers": {"addresses": ["8.8.8.8", "8.8.4.4"]}
+        """Create cloud-init configuration files."""
+        vm_dir = self.vm_dir / vm.name
+        vm_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Default cloud-init config if none provided
+        if not vm.config.cloud_init:
+            vm.config.cloud_init = {
+                'hostname': vm.name,
+                'users': [{
+                    'name': 'ubuntu',
+                    'sudo': 'ALL=(ALL) NOPASSWD:ALL',
+                    'shell': '/bin/bash',
+                    'ssh_authorized_keys': []
+                }]
             }
+        
+        # Write meta-data
+        meta_data = f"""instance-id: {vm.id}
+local-hostname: {vm.name}
+"""
+        (vm_dir / 'meta-data').write_text(meta_data)
+        
+        # Write user-data
+        user_data = f"""#cloud-config
+hostname: {vm.config.cloud_init['hostname']}
+users:
+  - name: {vm.config.cloud_init['users'][0]['name']}
+    sudo: {vm.config.cloud_init['users'][0]['sudo']}
+    shell: {vm.config.cloud_init['users'][0]['shell']}
+    ssh_authorized_keys: {json.dumps(vm.config.cloud_init['users'][0]['ssh_authorized_keys'])}
 
-        # Merge with custom cloud-init config if provided
-        if vm.config.cloud_init:
-            self._merge_cloud_init(user_data, vm.config.cloud_init)
+# Configure for ARM64
+apt:
+  primary:
+    - arches: [arm64, default]
+      uri: http://ports.ubuntu.com/ubuntu-ports/
 
-        # Write cloud-init files
-        (cloud_init_dir / "user-data").write_text("#cloud-config\n" + json.dumps(user_data, indent=2))
-        (cloud_init_dir / "meta-data").write_text(f"""instance-id: {vm.id}
-local-hostname: {vm.name}""")
+# Install required packages
+packages:
+  - qemu-guest-agent
+  - cloud-init
+  - openssh-server
 
-        # Create network-config
-        network_config = """version: 2
-ethernets:
-  eth0:
-    dhcp4: false"""
-        (cloud_init_dir / "network-config").write_text(network_config)
+# Enable services
+runcmd:
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  - systemctl enable ssh
+  - systemctl start ssh
 
-        # Create the cloud-init ISO
+# Configure networking
+network:
+  version: 2
+  ethernets:
+    enp0s1:
+      dhcp4: true
+      dhcp6: false
+"""
+        (vm_dir / 'user-data').write_text(user_data)
+        
+        # Create ISO file
+        iso_path = self.vm_dir / f"{vm.name}-cloud-init.iso"
         subprocess.run([
             'mkisofs',
-            '-output', str(self.vm_dir / f"{vm.name}-cloud-init.iso"),
+            '-output', str(iso_path),
             '-volid', 'cidata',
             '-joliet',
             '-rock',
-            '-input-charset', 'utf-8',
-            str(cloud_init_dir / "user-data"),
-            str(cloud_init_dir / "meta-data"),
-            str(cloud_init_dir / "network-config")
+            str(vm_dir / 'user-data'),
+            str(vm_dir / 'meta-data')
         ], check=True)
 
     def _merge_cloud_init(self, base: dict, custom: dict) -> None:

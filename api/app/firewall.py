@@ -5,6 +5,8 @@ import subprocess
 import ipaddress
 import logging
 import uuid
+import platform
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +19,7 @@ class FirewallRule:
         self.port_range = port_range
         self.source = source
         self.description = description
-        self.iptables_rule = None
+        self.pf_rule = None
 
     def to_dict(self) -> dict:
         return {
@@ -27,7 +29,7 @@ class FirewallRule:
             "port_range": self.port_range,
             "source": self.source,
             "description": self.description,
-            "iptables_rule": self.iptables_rule
+            "pf_rule": self.pf_rule
         }
 
     @classmethod
@@ -40,7 +42,7 @@ class FirewallRule:
             source=data["source"],
             description=data.get("description", "")
         )
-        rule.iptables_rule = data.get("iptables_rule")
+        rule.pf_rule = data.get("pf_rule")
         return rule
 
 class FirewallManager:
@@ -48,46 +50,59 @@ class FirewallManager:
         self.rules_dir = Path("firewall")
         self.rules_dir.mkdir(parents=True, exist_ok=True)
         self.rules: Dict[str, Dict[str, FirewallRule]] = {}
+        self.pf_conf_path = "/etc/pf.conf"
+        self.pf_anchor = "vm-rules"
         self._init_firewall()
         self._load_rules()
 
     def _init_firewall(self) -> None:
         try:
-            for chain in ['VM-INBOUND', 'VM-OUTBOUND']:
-                try:
-                    subprocess.run(['sudo', 'iptables', '-N', chain], check=True)
-                except subprocess.CalledProcessError:
-                    pass
+            # Create a backup of the original pf.conf if it doesn't exist
+            if not os.path.exists(f"{self.pf_conf_path}.backup"):
+                subprocess.run(['sudo', 'cp', self.pf_conf_path, f"{self.pf_conf_path}.backup"], check=True)
 
-            for chain in ['VM-INBOUND', 'VM-OUTBOUND']:
-                subprocess.run(['sudo', 'iptables', '-F', chain], check=True)
+            # Add our anchor to pf.conf if it's not already there
+            try:
+                conf_content = subprocess.run(['sudo', 'cat', self.pf_conf_path], check=True, capture_output=True, text=True).stdout
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to read pf.conf: {e}")
+                raise
 
-            subprocess.run(['sudo', 'iptables', '-P', 'INPUT', 'DROP'], check=True)
-            subprocess.run(['sudo', 'iptables', '-P', 'FORWARD', 'DROP'], check=True)
-            subprocess.run(['sudo', 'iptables', '-P', 'OUTPUT', 'ACCEPT'], check=True)
+            if f"anchor \"{self.pf_anchor}\"" not in conf_content:
+                # Create a temporary file with the new content
+                temp_conf = Path("/tmp/pf.conf.tmp")
+                temp_conf.write_text(conf_content + f"\nanchor \"{self.pf_anchor}\"\n")
+                
+                # Use sudo to copy the temporary file to pf.conf
+                subprocess.run(['sudo', 'cp', str(temp_conf), self.pf_conf_path], check=True)
 
-            subprocess.run([
-                'sudo', 'iptables', '-A', 'INPUT',
-                '-m', 'state', '--state', 'ESTABLISHED,RELATED',
-                '-j', 'ACCEPT'
-            ], check=True)
+            # Enable PF if it's not already enabled
+            subprocess.run(['sudo', 'pfctl', '-e'], check=False)  # Ignore if already enabled
+            
+            # Create initial anchor rules
+            initial_rules = """# VM Rules
+# Default policy
+block return in all
+block return out all
 
-            subprocess.run([
-                'sudo', 'iptables', '-A', 'INPUT',
-                '-i', 'lo',
-                '-j', 'ACCEPT'
-            ], check=True)
+# Allow established connections
+pass in quick proto tcp from any to any flags S/SA keep state
+pass out quick proto tcp from any to any flags S/SA keep state
 
-            subprocess.run([
-                'sudo', 'iptables', '-A', 'INPUT',
-                '-j', 'VM-INBOUND'
-            ], check=True)
-            subprocess.run([
-                'sudo', 'iptables', '-A', 'OUTPUT',
-                '-j', 'VM-OUTBOUND'
-            ], check=True)
-
-            logger.info("Initialized firewall chains and policies")
+# Allow basic outbound connectivity
+pass out quick proto tcp from any to any keep state
+pass out quick proto udp from any to any keep state
+pass out quick proto icmp from any to any keep state
+"""
+            
+            # Write initial rules to a temporary file
+            temp_rules_file = Path("/tmp/pf_initial_rules")
+            temp_rules_file.write_text(initial_rules)
+            
+            # Load the rules into our anchor
+            subprocess.run(['sudo', 'pfctl', '-a', self.pf_anchor, '-f', str(temp_rules_file)], check=True)
+            
+            logger.info("Initialized PF firewall rules")
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to initialize firewall: {e}")
@@ -102,7 +117,7 @@ class FirewallManager:
                 for rule_id, rule_data in rules_data.items():
                     rule = FirewallRule.from_dict(rule_data)
                     self.rules[cluster_id][rule_id] = rule
-                    if rule.iptables_rule:
+                    if rule.pf_rule:
                         try:
                             self._apply_rule(cluster_id, rule)
                         except Exception as e:
@@ -117,40 +132,45 @@ class FirewallManager:
                 indent=2
             )
 
-    def _build_iptables_rule(self, rule: FirewallRule) -> List[str]:
-        chain = "VM-INBOUND" if rule.direction == "inbound" else "VM-OUTBOUND"
-        cmd = ['-A', chain, '-p', rule.protocol]
+    def _build_pf_rule(self, rule: FirewallRule) -> str:
+        direction = "in" if rule.direction == "inbound" else "out"
+        action = "pass"
         
+        # Handle port range
         ports = rule.port_range.split("-")
         if len(ports) == 1:
-            cmd.extend([
-                '--dport' if rule.direction == "inbound" else '--sport',
-                ports[0]
-            ])
-        elif len(ports) == 2:
-            cmd.extend([
-                '-m', 'multiport',
-                '--dports' if rule.direction == "inbound" else '--sports',
-                rule.port_range
-            ])
-        
-        if rule.direction == "inbound":
-            cmd.extend(['-s', rule.source])
+            port_spec = f"port {ports[0]}"
         else:
-            cmd.extend(['-d', rule.source])
+            port_spec = f"port {ports[0]}:{ports[1]}"
         
-        cmd.extend(['-j', 'ACCEPT'])
-        cmd.extend(['-m', 'comment', '--comment', f'id:{rule.rule_id}'])
+        # Build the rule
+        pf_rule = f"{action} {direction} proto {rule.protocol} from {rule.source} to any {port_spec}"
         
-        return cmd
+        # Add rule ID as a comment
+        pf_rule += f" # id:{rule.rule_id}"
+        
+        return pf_rule
 
     def _apply_rule(self, cluster_id: str, rule: FirewallRule) -> None:
         try:
-            cmd_args = self._build_iptables_rule(rule)
-            cmd = ['sudo', 'iptables'] + cmd_args
-            rule.iptables_rule = ' '.join(cmd_args)
-            subprocess.run(cmd, check=True)
-            logger.info(f"Applied firewall rule: {' '.join(cmd)}")
+            # Build the PF rule
+            pf_rule = self._build_pf_rule(rule)
+            rule.pf_rule = pf_rule
+            
+            # Write all rules to a temporary file
+            temp_rules_file = Path("/tmp/pf_rules")
+            all_rules = []
+            for cluster_rules in self.rules.values():
+                for r in cluster_rules.values():
+                    if r.pf_rule:
+                        all_rules.append(r.pf_rule)
+            
+            temp_rules_file.write_text("\n".join(all_rules))
+            
+            # Load the rules into our anchor
+            subprocess.run(['sudo', 'pfctl', '-a', self.pf_anchor, '-f', str(temp_rules_file)], check=True)
+            
+            logger.info(f"Applied firewall rule: {pf_rule}")
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to apply firewall rule: {e}")
@@ -158,14 +178,27 @@ class FirewallManager:
 
     def _remove_rule(self, cluster_id: str, rule: FirewallRule) -> None:
         try:
-            if not rule.iptables_rule:
-                logger.warning(f"No iptables rule found for {rule.rule_id}")
+            if not rule.pf_rule:
+                logger.warning(f"No PF rule found for {rule.rule_id}")
                 return
             
-            cmd_args = rule.iptables_rule.replace('-A', '-D', 1).split()
-            cmd = ['sudo', 'iptables'] + cmd_args
-            subprocess.run(cmd, check=True)
-            logger.info(f"Removed firewall rule: {' '.join(cmd)}")
+            # Remove the rule by reapplying all rules except this one
+            rule.pf_rule = None
+            
+            # Write remaining rules to a temporary file
+            temp_rules_file = Path("/tmp/pf_rules")
+            all_rules = []
+            for cluster_rules in self.rules.values():
+                for r in cluster_rules.values():
+                    if r.pf_rule:
+                        all_rules.append(r.pf_rule)
+            
+            temp_rules_file.write_text("\n".join(all_rules))
+            
+            # Load the rules into our anchor
+            subprocess.run(['sudo', 'pfctl', '-a', self.pf_anchor, '-f', str(temp_rules_file)], check=True)
+            
+            logger.info(f"Removed firewall rule: {rule.rule_id}")
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to remove firewall rule: {e}")

@@ -1,0 +1,8 @@
+{
+  "192.168.0.0": {
+    "status": "available",
+    "attached_to": null,
+    "is_elastic": false,
+    "interface": null
+  }
+}

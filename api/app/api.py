@@ -33,9 +33,9 @@ sys.path.append(str(root_dir))
 
 # Import after adding to path
 from vpc import VPCManager
-from .vm import LibvirtManager
-from .ip_manager import IPManager
-from .firewall import FirewallManager
+from vm import LibvirtManager
+from ip_manager import IPManager
+from firewall import FirewallManager
 
 app = Flask(__name__)
 CORS(app)
@@ -983,8 +983,8 @@ def get_machine_console(cluster, machine):
 
 # Disk operations
 @app.route('/api/clusters/<cluster>/machines/<machine>/disks', methods=['POST'])
-def attach_disk(cluster, machine):
-    """Attach a disk to a machine"""
+def attach_cluster_disk(cluster, machine):
+    """Attach a disk to a machine in a cluster"""
     try:
         vpc = vpc_manager.get_vpc(cluster)
         if not vpc:
@@ -998,8 +998,8 @@ def attach_disk(cluster, machine):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/clusters/<cluster>/machines/<machine>/disks/<disk>', methods=['DELETE'])
-def detach_disk(cluster, machine, disk):
-    """Detach a disk from a machine"""
+def detach_cluster_disk(cluster, machine, disk):
+    """Detach a disk from a machine in a cluster"""
     try:
         vpc = vpc_manager.get_vpc(cluster)
         if not vpc:
@@ -1043,8 +1043,8 @@ def get_cluster_disk(cluster, disk):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/clusters/<cluster>/disks/<disk>/size', methods=['POST'])
-def resize_disk(cluster, disk):
-    """Resize a disk"""
+def resize_cluster_disk(cluster, disk):
+    """Resize a disk in a cluster"""
     try:
         vpc = vpc_manager.get_vpc(cluster)
         if not vpc:
@@ -1348,14 +1348,4 @@ def create_incremental_snapshot(cluster, machine):
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Use eventlet's WSGI server
-    logger.info("Starting server with eventlet WebSocket support...")
-    socketio.run(
-        app,
-        host='0.0.0.0',
-        port=5000,
-        debug=True,
-        use_reloader=False,
-        log_output=True,
-        websocket=True
-    ) 
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False) 
