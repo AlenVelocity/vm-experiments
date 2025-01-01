@@ -1,16 +1,26 @@
-import subprocess
-import json
-from pathlib import Path
-from typing import Optional, List, Dict
-import shutil
-from dataclasses import dataclass
-import uuid
 import os
-import socket
+import sys
+import subprocess
+import shutil
 import time
+import json
+import logging
+import ipaddress
+import requests
+import uuid
+import socket
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass
 import libvirt
 import xml.etree.ElementTree as ET
-from .networking import NetworkManager, NetworkType
+from networking import NetworkManager, NetworkType
+from ip_manager import IPManager
+from disk_manager import DiskManager
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class VMConfig:
@@ -19,6 +29,7 @@ class VMConfig:
     memory_mb: int = 2048
     disk_size_gb: int = 20
     network_name: Optional[str] = None
+    cloud_init: Optional[Dict[str, Any]] = None
 
 @dataclass
 class VM:
@@ -30,35 +41,28 @@ class VM:
 
 class LibvirtManager:
     def __init__(self):
-        # Use absolute path for VM directory
-        self.vm_dir = Path.home() / "vm-experiments" / "vms"
-        self.vm_dir.mkdir(parents=True, exist_ok=True)
-        self.network_manager = NetworkManager()
-        
-        # Try different connection methods
-        connection_uris = [
-            'qemu+unix:///system?socket=/opt/homebrew/var/run/libvirt/libvirt-sock',
-            'qemu:///system',
-            'qemu:///session'
-        ]
-        
-        last_error = None
-        for uri in connection_uris:
-            try:
-                self.conn = libvirt.open(uri)
-                if self.conn:
-                    print(f"Successfully connected to libvirt using {uri}")
-                    break
-            except libvirt.libvirtError as e:
-                last_error = e
-                print(f"Failed to connect using {uri}: {str(e)}")
-                continue
-        
-        if not self.conn:
-            raise Exception(f'Failed to connect to libvirt: {str(last_error)}')
+        try:
+            # For M1 Macs, we need to use the session URI instead of system
+            self.conn = libvirt.open('qemu:///session')
+            if not self.conn:
+                raise Exception("Failed to open connection to qemu:///session")
             
-        self._init_storage_pool()
-        self.vms: Dict[str, VM] = self._load_vms()
+            self.vm_dir = Path(__file__).parent.parent / "vms"
+            self.vm_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Initialize storage pool first
+            self._init_storage_pool()
+            
+            self.network_manager = NetworkManager(self.conn)
+            self.ip_manager = IPManager()
+            self.disk_manager = DiskManager(self.conn)
+            
+            self.vms = {}  # Dictionary to store VM instances
+            
+            logger.info("LibvirtManager initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize LibvirtManager: {str(e)}")
+            raise
 
     def __del__(self):
         if hasattr(self, 'conn'):
@@ -68,27 +72,42 @@ class LibvirtManager:
                 pass
 
     def _init_storage_pool(self):
+        """Initialize the default storage pool for QEMU/KVM"""
         try:
+            # Try to find existing pool
             pool = self.conn.storagePoolLookupByName('default')
+            if not pool.isActive():
+                pool.create()
+            return pool
         except libvirt.libvirtError:
+            # Create pool directory in user's home directory for session mode
             pool_path = Path.home() / '.local/share/libvirt/images'
             pool_path.mkdir(parents=True, exist_ok=True)
             
+            # Define pool XML
             pool_xml = f"""
             <pool type='dir'>
                 <name>default</name>
                 <target>
-                    <path>{pool_path}</path>
+                    <path>{str(pool_path)}</path>
+                    <permissions>
+                        <mode>0755</mode>
+                    </permissions>
                 </target>
             </pool>
             """
+            
+            # Create the pool
             pool = self.conn.storagePoolDefineXML(pool_xml)
             if not pool:
                 raise Exception("Failed to create storage pool")
             
+            # Start the pool
             pool.setAutostart(True)
-            if not pool.isActive():
-                pool.create()
+            pool.create()
+            
+            logger.info(f"Created default storage pool at {pool_path}")
+            return pool
 
     def _load_vms(self) -> Dict[str, VM]:
         vms = {}
@@ -128,30 +147,40 @@ class LibvirtManager:
         raise Exception("No free ports available")
 
     def _generate_domain_xml(self, vm: VM, disk_path: Path) -> str:
-        domain = ET.Element('domain', type='qemu')
-        ET.SubElement(domain, 'name').text = vm.name
-        ET.SubElement(domain, 'uuid').text = vm.id
-        ET.SubElement(domain, 'memory', unit='MiB').text = str(vm.config.memory_mb)
-        ET.SubElement(domain, 'currentMemory', unit='MiB').text = str(vm.config.memory_mb)
-        vcpu = ET.SubElement(domain, 'vcpu', placement='static')
-        vcpu.text = str(vm.config.cpu_cores)
+        """Generate libvirt domain XML for the VM."""
+        root = ET.Element('domain', type='qemu')  # Use QEMU directly for M1
         
-        os = ET.SubElement(domain, 'os')
+        # Basic metadata
+        ET.SubElement(root, 'name').text = vm.name
+        ET.SubElement(root, 'uuid').text = vm.id
+        ET.SubElement(root, 'title').text = f"VM {vm.name}"
+        
+        # Use aarch64 for M1
+        os = ET.SubElement(root, 'os')
         ET.SubElement(os, 'type', arch='aarch64', machine='virt').text = 'hvm'
         ET.SubElement(os, 'boot', dev='hd')
         
-        features = ET.SubElement(domain, 'features')
-        ET.SubElement(features, 'gic', version='3')
+        # Memory and CPU configuration
+        memory_kb = vm.config.memory_mb * 1024
+        ET.SubElement(root, 'memory', unit='KiB').text = str(memory_kb)
+        ET.SubElement(root, 'currentMemory', unit='KiB').text = str(memory_kb)
+        
+        vcpu = ET.SubElement(root, 'vcpu', placement='static')
+        vcpu.text = str(vm.config.cpu_cores)
+        
+        # CPU configuration for M1
+        cpu = ET.SubElement(root, 'cpu', mode='host-passthrough')
+        ET.SubElement(cpu, 'topology', sockets='1', cores=str(vm.config.cpu_cores), threads='1')
+        
+        # Features
+        features = ET.SubElement(root, 'features')
         ET.SubElement(features, 'acpi')
+        ET.SubElement(features, 'gic', version='3')
         
-        # Use custom CPU mode with cortex-a72 model for ARM64
-        cpu = ET.SubElement(domain, 'cpu', mode='custom')
-        ET.SubElement(cpu, 'model', fallback='allow').text = 'cortex-a72'
-        topology = ET.SubElement(cpu, 'topology', sockets='1', cores=str(vm.config.cpu_cores), threads='1')
+        # Devices
+        devices = ET.SubElement(root, 'devices')
         
-        devices = ET.SubElement(domain, 'devices')
-        
-        # Add emulator
+        # Emulator
         ET.SubElement(devices, 'emulator').text = '/opt/homebrew/bin/qemu-system-aarch64'
         
         # Main disk
@@ -164,7 +193,7 @@ class LibvirtManager:
         cloud_init_disk = ET.SubElement(devices, 'disk', type='file', device='cdrom')
         ET.SubElement(cloud_init_disk, 'driver', name='qemu', type='raw')
         ET.SubElement(cloud_init_disk, 'source', file=str(self.vm_dir / f"{vm.name}-cloud-init.iso"))
-        ET.SubElement(cloud_init_disk, 'target', dev='sda', bus='sata')
+        ET.SubElement(cloud_init_disk, 'target', dev='sda', bus='usb')  # Use USB for CDROM on ARM64
         ET.SubElement(cloud_init_disk, 'readonly')
         
         # Add virtio-serial for console
@@ -185,110 +214,92 @@ class LibvirtManager:
         # Add network interface with SSH port forwarding
         interface = ET.SubElement(devices, 'interface', type='user')
         ET.SubElement(interface, 'model', type='virtio')
-        hostfwd = ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
+        ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
         
-        # Add QEMU guest agent channel
-        channel = ET.SubElement(devices, 'channel', type='unix')
-        ET.SubElement(channel, 'target', type='virtio', name='org.qemu.guest_agent.0')
-        
-        return ET.tostring(domain, encoding='unicode')
+        return ET.tostring(root, encoding='unicode', pretty_print=True)
 
     def _create_cloud_init_config(self, vm: VM) -> None:
-        cloud_init_dir = self.vm_dir / vm.id / "cloud-init"
-        cloud_init_dir.mkdir(parents=True, exist_ok=True)
-
-        # Get user's SSH public key
-        ssh_key_path = Path.home() / '.ssh' / 'id_rsa.pub'
-        if not ssh_key_path.exists():
-            subprocess.run(['ssh-keygen', '-t', 'rsa', '-N', '', '-f', 
-                          str(ssh_key_path).replace('.pub', '')], check=True)
+        """Create cloud-init configuration files."""
+        vm_dir = self.vm_dir / vm.name
+        vm_dir.mkdir(parents=True, exist_ok=True)
         
-        ssh_key = ssh_key_path.read_text().strip()
-
-        # Create user-data
+        # Default cloud-init config if none provided
+        if not vm.config.cloud_init:
+            vm.config.cloud_init = {
+                'hostname': vm.name,
+                'users': [{
+                    'name': 'ubuntu',
+                    'sudo': 'ALL=(ALL) NOPASSWD:ALL',
+                    'shell': '/bin/bash',
+                    'ssh_authorized_keys': []
+                }]
+            }
+        
+        # Write meta-data
+        meta_data = f"""instance-id: {vm.id}
+local-hostname: {vm.name}
+"""
+        (vm_dir / 'meta-data').write_text(meta_data)
+        
+        # Write user-data
         user_data = f"""#cloud-config
-hostname: {vm.name}
-fqdn: {vm.name}.local
-
+hostname: {vm.config.cloud_init['hostname']}
 users:
-  - name: ubuntu
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: users, admin
-    shell: /bin/bash
-    lock_passwd: false
-    # Password is 'ubuntu'
-    passwd: $6$rounds=4096$saltsalt$NQ.HoH98E3nIxwh6nUBcQgwXrfHqycWYeXGpM6WAw6RQCLqmVoqc7yBz5Yk0lmBmcJpZxPxhqB2.Ua0PKgBE0/
-    ssh_authorized_keys:
-      - {ssh_key}
+  - name: {vm.config.cloud_init['users'][0]['name']}
+    sudo: {vm.config.cloud_init['users'][0]['sudo']}
+    shell: {vm.config.cloud_init['users'][0]['shell']}
+    ssh_authorized_keys: {json.dumps(vm.config.cloud_init['users'][0]['ssh_authorized_keys'])}
 
-ssh_pwauth: true
-ssh_deletekeys: false
-ssh_genkeytypes: ['rsa', 'ecdsa', 'ed25519']
+# Configure for ARM64
+apt:
+  primary:
+    - arches: [arm64, default]
+      uri: http://ports.ubuntu.com/ubuntu-ports/
 
-package_update: true
-package_upgrade: true
-
+# Install required packages
 packages:
   - qemu-guest-agent
-  - openssh-server
   - cloud-init
-  - net-tools
+  - openssh-server
 
-write_files:
-  - path: /etc/ssh/sshd_config
-    content: |
-      Port 22
-      ListenAddress 0.0.0.0
-      PermitRootLogin no
-      PubkeyAuthentication yes
-      PasswordAuthentication yes
-      ChallengeResponseAuthentication no
-      UsePAM yes
-      X11Forwarding yes
-      PrintMotd no
-      AcceptEnv LANG LC_*
-      Subsystem sftp /usr/lib/openssh/sftp-server
-
+# Enable services
 runcmd:
-  - systemctl enable ssh
-  - systemctl start ssh
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
-  - netplan apply
+  - systemctl enable ssh
+  - systemctl start ssh
 
-power_state:
-  mode: reboot
-  timeout: 300
-  condition: true"""
-
-        # Create meta-data
-        meta_data = f"""instance-id: {vm.id}
-local-hostname: {vm.name}"""
-
-        # Create network-config
-        network_config = f"""version: 2
-ethernets:
-  eth0:
-    dhcp4: true
-    optional: true"""
-
-        # Write the files
-        (cloud_init_dir / "user-data").write_text(user_data)
-        (cloud_init_dir / "meta-data").write_text(meta_data)
-        (cloud_init_dir / "network-config").write_text(network_config)
-
-        # Create the cloud-init ISO
+# Configure networking
+network:
+  version: 2
+  ethernets:
+    enp0s1:
+      dhcp4: true
+      dhcp6: false
+"""
+        (vm_dir / 'user-data').write_text(user_data)
+        
+        # Create ISO file
+        iso_path = self.vm_dir / f"{vm.name}-cloud-init.iso"
         subprocess.run([
             'mkisofs',
-            '-output', str(self.vm_dir / f"{vm.name}-cloud-init.iso"),
+            '-output', str(iso_path),
             '-volid', 'cidata',
             '-joliet',
             '-rock',
-            '-input-charset', 'utf-8',
-            str(cloud_init_dir / "user-data"),
-            str(cloud_init_dir / "meta-data"),
-            str(cloud_init_dir / "network-config")
+            str(vm_dir / 'user-data'),
+            str(vm_dir / 'meta-data')
         ], check=True)
+
+    def _merge_cloud_init(self, base: dict, custom: dict) -> None:
+        """Recursively merge custom cloud-init config into base config."""
+        for key, value in custom.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                self._merge_cloud_init(base[key], value)
+            elif key in base and isinstance(base[key], list) and isinstance(value, list):
+                base[key].extend(value)
+            else:
+                base[key] = value
 
     def create_vm(self, name: str, vpc_name: str) -> VM:
         vm_id = str(uuid.uuid4())
@@ -297,6 +308,14 @@ ethernets:
         vm_path = self.vm_dir / vm_id
         vm_path.mkdir(parents=True, exist_ok=True)
         vm.ssh_port = self._find_free_port()
+
+        # Get an available public IP
+        public_ip = self.ip_manager.get_available_ip()
+        if public_ip:
+            self.ip_manager.attach_ip(public_ip, vm_id)
+        else:
+            logger.warning(f"No available public IPs for VM {name}")
+            public_ip = None
 
         # Generate unique network information
         vm_number = int(vm_id[-4:], 16) % 254  # Use last 4 chars of UUID as hex number
@@ -310,14 +329,17 @@ ethernets:
                 'subnet_mask': "255.255.255.0",
                 'gateway': f"192.168.{subnet}.1",
                 'network_name': f"{vpc_name}-private"
-            },
-            'public': {
-                'ip': f"10.{subnet}.{host}.2",
+            }
+        }
+
+        # Add public network info if IP is available
+        if public_ip:
+            vm.network_info['public'] = {
+                'ip': public_ip,
                 'subnet_mask': "255.255.255.0",
                 'gateway': f"10.{subnet}.{host}.1",
                 'network_name': f"{vpc_name}-public"
             }
-        }
 
         # Save VM configuration
         with open(vm_path / "config.json", "w") as f:
@@ -332,47 +354,12 @@ ethernets:
             }
             json.dump(config_dict, f)
 
-        try:
-            # Create cloud-init configuration
-            self._create_cloud_init_config(vm)
+        # Create the VM
+        self._create_vm_disk(vm)
+        self._create_cloud_init_config(vm)
+        self._start_vm(vm)
 
-            pool = self.conn.storagePoolLookupByName('default')
-            
-            # Generate a unique volume name
-            volume_name = f"{name}-{vm_id[:8]}.qcow2"
-            
-            # Check if volume exists and delete it if it does
-            try:
-                old_volume = pool.storageVolLookupByName(volume_name)
-                old_volume.delete(0)
-            except libvirt.libvirtError:
-                pass  # Volume doesn't exist, which is fine
-            
-            vol_xml = f"""
-            <volume type='file'>
-                <name>{volume_name}</name>
-                <capacity unit='G'>{config.disk_size_gb}</capacity>
-                <target>
-                    <format type='qcow2'/>
-                </target>
-            </volume>
-            """
-            volume = pool.createXML(vol_xml, 0)
-            if not volume:
-                raise Exception("Failed to create storage volume")
-
-            domain_xml = self._generate_domain_xml(vm, Path(volume.path()))
-            domain = self.conn.defineXML(domain_xml)
-            if not domain:
-                raise Exception("Failed to define VM domain")
-
-            self.vms[vm_id] = vm
-            return vm
-            
-        except Exception as e:
-            if vm_path.exists():
-                shutil.rmtree(vm_path)
-            raise Exception(f"Failed to create VM: {str(e)}")
+        return vm
 
     def start_vm(self, vm_id: str) -> bool:
         vm = self.vms.get(vm_id)
@@ -576,35 +563,22 @@ VNC access available at:
             raise Exception(f"Failed to stop VM: {str(e)}")
 
     def delete_vm(self, vm_id: str) -> bool:
-        vm = self.vms.get(vm_id)
-        if not vm:
-            return False
-
+        """Delete a VM and release its IP if it has one."""
         try:
-            domain = self.conn.lookupByName(vm.name)
-            if domain.isActive():
-                domain.destroy()
-            
-            pool = self.conn.storagePoolLookupByName('default')
-            try:
-                volume = pool.storageVolLookupByName(f"{vm.name}.qcow2")
-                volume.delete(0)
-            except libvirt.libvirtError:
-                pass
+            # Get VM's IPs before deletion
+            vm = self.get_vm(vm_id)
+            if vm and vm.network_info and 'public' in vm.network_info:
+                public_ip = vm.network_info['public']['ip']
+                try:
+                    self.ip_manager.detach_ip(public_ip)
+                except Exception as e:
+                    logger.error(f"Error detaching IP {public_ip} from VM {vm_id}: {e}")
 
-            domain.undefineFlags(
-                libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE |
-                libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
-            )
-            
-            vm_path = self.vm_dir / vm_id
-            if vm_path.exists():
-                shutil.rmtree(vm_path)
-
-            del self.vms[vm_id]
-            return True
-        except libvirt.libvirtError as e:
-            raise Exception(f"Failed to delete VM: {str(e)}")
+            # Proceed with normal VM deletion
+            super().delete_vm(vm_id)
+        except Exception as e:
+            logger.error(f"Error deleting VM {vm_id}: {e}")
+            raise
 
     def get_vm_status(self, vm_id: str) -> Dict:
         vm = self.vms.get(vm_id)
@@ -748,13 +722,41 @@ VNC access available at:
 
         try:
             domain = self.conn.lookupByName(vm.name)
+            
+            # Get all attached disks
+            xml = domain.XMLDesc()
+            root = ET.fromstring(xml)
+            disks = root.findall('.//disk[@device="disk"]')
+            
+            # Prepare snapshot XML with all disks
             snapshot_xml = f"""
             <domainsnapshot>
                 <name>{name}</name>
                 <description>{description}</description>
+                <disks>
+            """
+            
+            # Add each disk to the snapshot
+            for disk in disks:
+                target = disk.find('target')
+                if target is not None:
+                    dev = target.get('dev')
+                    snapshot_xml += f"""
+                    <disk name='{dev}'>
+                        <source/>
+                    </disk>
+                    """
+            
+            snapshot_xml += """
+                </disks>
             </domainsnapshot>
             """
-            snapshot = domain.snapshotCreateXML(snapshot_xml)
+            
+            # Create snapshot with flags for disk snapshot
+            flags = (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY |
+                    libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_ATOMIC)
+            snapshot = domain.snapshotCreateXML(snapshot_xml, flags)
+            
             return bool(snapshot)
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to create snapshot: {str(e)}")
@@ -875,3 +877,94 @@ VNC access available at:
             return True
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to import snapshot: {str(e)}")
+
+    def create_disk(self, name: str, size_gb: int) -> dict:
+        """Create a new disk."""
+        disk = self.disk_manager.create_disk(name, size_gb)
+        return disk.to_dict()
+
+    def delete_disk(self, disk_id: str) -> None:
+        """Delete a disk."""
+        self.disk_manager.delete_disk(disk_id)
+
+    def attach_disk(self, disk_id: str, vm_name: str) -> None:
+        """Attach a disk to a VM."""
+        self.disk_manager.attach_disk(disk_id, vm_name)
+
+    def detach_disk(self, disk_id: str) -> None:
+        """Detach a disk from its VM."""
+        self.disk_manager.detach_disk(disk_id)
+
+    def list_disks(self) -> List[dict]:
+        """List all disks."""
+        return self.disk_manager.list_disks()
+
+    def get_disk(self, disk_id: str) -> Optional[dict]:
+        """Get disk details."""
+        disk = self.disk_manager.get_disk(disk_id)
+        return disk.to_dict() if disk else None
+
+    def resize_disk(self, disk_id: str, new_size_gb: int) -> None:
+        """Resize a disk."""
+        self.disk_manager.resize_disk(disk_id, new_size_gb)
+
+    def get_machine_disks(self, vm_name: str) -> List[dict]:
+        """Get all disks attached to a VM."""
+        return self.disk_manager.get_machine_disks(vm_name)
+
+    def create_incremental_snapshot(self, vm_id: str, name: str, parent_snapshot: str = None, description: str = "") -> bool:
+        """Create an incremental snapshot that only stores changes since the parent snapshot."""
+        vm = self.vms.get(vm_id)
+        if not vm:
+            return False
+
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            
+            # Get all attached disks
+            xml = domain.XMLDesc()
+            root = ET.fromstring(xml)
+            disks = root.findall('.//disk[@device="disk"]')
+            
+            # Prepare snapshot XML with all disks
+            snapshot_xml = f"""
+            <domainsnapshot>
+                <name>{name}</name>
+                <description>{description}</description>
+                <parent>
+                    <name>{parent_snapshot}</name>
+                </parent>
+                <disks>
+            """
+            
+            # Add each disk to the snapshot with incremental backup
+            for disk in disks:
+                target = disk.find('target')
+                if target is not None:
+                    dev = target.get('dev')
+                    snapshot_xml += f"""
+                    <disk name='{dev}' snapshot='external'>
+                        <driver type='qcow2'/>
+                        <source/>
+                    </disk>
+                    """
+            
+            snapshot_xml += """
+                </disks>
+            </domainsnapshot>
+            """
+            
+            # Create snapshot with flags for incremental backup
+            flags = (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY |
+                    libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_REUSE_EXT)
+            
+            if parent_snapshot:
+                parent = domain.snapshotLookupByName(parent_snapshot)
+                if not parent:
+                    raise Exception(f"Parent snapshot {parent_snapshot} not found")
+            
+            snapshot = domain.snapshotCreateXML(snapshot_xml, flags)
+            return bool(snapshot)
+            
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to create incremental snapshot: {str(e)}")

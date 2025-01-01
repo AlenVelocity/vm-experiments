@@ -33,7 +33,9 @@ sys.path.append(str(root_dir))
 
 # Import after adding to path
 from vpc import VPCManager
-from .vm import LibvirtManager
+from vm import LibvirtManager
+from ip_manager import IPManager
+from firewall import FirewallManager
 
 app = Flask(__name__)
 CORS(app)
@@ -41,6 +43,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger
 
 vpc_manager = VPCManager()
 vm_manager = LibvirtManager()
+ip_manager = IPManager()
+firewall_manager = FirewallManager()
 
 # Store active console sessions
 console_sessions = {}
@@ -312,6 +316,7 @@ def create_vm():
         data = request.json
         name = data.get('name')
         vpc_name = data.get('vpc')
+        cloud_init = data.get('cloud_init')  # Optional cloud-init configuration
         
         if not name or not vpc_name:
             return jsonify({'error': 'VM name and VPC are required'}), 400
@@ -338,8 +343,15 @@ def create_vm():
         else:
             logger.info("Ubuntu image already exists, skipping download")
         
+        # Create VM config with cloud-init if provided
+        config = VMConfig(
+            name=name,
+            network_name=vpc_name,
+            cloud_init=cloud_init
+        )
+        
         # Create the VM
-        vm_manager.create_vm(name, vpc_name)
+        vm = vm_manager.create_vm(name, vpc_name, config)
         
         return jsonify({'message': f'VM {name} created successfully in VPC {vpc_name}'})
     except Exception as e:
@@ -584,14 +596,10 @@ def get_cluster(name):
 # Firewall rules
 @app.route('/api/clusters/<cluster>/firewall/rules', methods=['GET'])
 def list_firewall_rules(cluster):
-    """List firewall rules for a cluster"""
+    """List firewall rules for a cluster."""
     try:
-        vpc = vpc_manager.get_vpc(cluster)
-        if not vpc:
-            return jsonify({'error': f'Cluster {cluster} not found'}), 404
-            
-        # TODO: Implement firewall rules in VPC
-        return jsonify({'rules': []})
+        rules = firewall_manager.list_rules(cluster)
+        return jsonify({'rules': rules})
     except Exception as e:
         logger.error(f"Error listing firewall rules: {str(e)}")
         logger.error(traceback.format_exc())
@@ -599,14 +607,29 @@ def list_firewall_rules(cluster):
 
 @app.route('/api/clusters/<cluster>/firewall/rules', methods=['POST'])
 def create_firewall_rule(cluster):
-    """Create a new firewall rule"""
+    """Create a new firewall rule."""
     try:
-        vpc = vpc_manager.get_vpc(cluster)
-        if not vpc:
-            return jsonify({'error': f'Cluster {cluster} not found'}), 404
-            
-        # TODO: Implement firewall rules in VPC
-        return jsonify({'message': 'Firewall rule created'}), 501
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        required_fields = ['direction', 'protocol', 'port_range', 'source']
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return jsonify({'error': f'Missing required fields: {", ".join(missing_fields)}'}), 400
+
+        rule = firewall_manager.create_rule(
+            cluster_id=cluster,
+            direction=data['direction'],
+            protocol=data['protocol'],
+            port_range=data['port_range'],
+            source=data['source'],
+            description=data.get('description', '')
+        )
+        
+        return jsonify({'rule': rule.to_dict()})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         logger.error(f"Error creating firewall rule: {str(e)}")
         logger.error(traceback.format_exc())
@@ -614,14 +637,12 @@ def create_firewall_rule(cluster):
 
 @app.route('/api/clusters/<cluster>/firewall/rules/<rule>', methods=['DELETE'])
 def delete_firewall_rule(cluster, rule):
-    """Delete a firewall rule"""
+    """Delete a firewall rule."""
     try:
-        vpc = vpc_manager.get_vpc(cluster)
-        if not vpc:
-            return jsonify({'error': f'Cluster {cluster} not found'}), 404
-            
-        # TODO: Implement firewall rules in VPC
-        return jsonify({'message': 'Firewall rule deleted'}), 501
+        firewall_manager.delete_rule(cluster, rule)
+        return jsonify({'message': f'Firewall rule {rule} deleted'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
     except Exception as e:
         logger.error(f"Error deleting firewall rule: {str(e)}")
         logger.error(traceback.format_exc())
@@ -962,8 +983,8 @@ def get_machine_console(cluster, machine):
 
 # Disk operations
 @app.route('/api/clusters/<cluster>/machines/<machine>/disks', methods=['POST'])
-def attach_disk(cluster, machine):
-    """Attach a disk to a machine"""
+def attach_cluster_disk(cluster, machine):
+    """Attach a disk to a machine in a cluster"""
     try:
         vpc = vpc_manager.get_vpc(cluster)
         if not vpc:
@@ -977,8 +998,8 @@ def attach_disk(cluster, machine):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/clusters/<cluster>/machines/<machine>/disks/<disk>', methods=['DELETE'])
-def detach_disk(cluster, machine, disk):
-    """Detach a disk from a machine"""
+def detach_cluster_disk(cluster, machine, disk):
+    """Detach a disk from a machine in a cluster"""
     try:
         vpc = vpc_manager.get_vpc(cluster)
         if not vpc:
@@ -1022,8 +1043,8 @@ def get_cluster_disk(cluster, disk):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/clusters/<cluster>/disks/<disk>/size', methods=['POST'])
-def resize_disk(cluster, disk):
-    """Resize a disk"""
+def resize_cluster_disk(cluster, disk):
+    """Resize a disk in a cluster"""
     try:
         vpc = vpc_manager.get_vpc(cluster)
         if not vpc:
@@ -1051,15 +1072,280 @@ def update_disk_performance(cluster, disk):
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+# IP Management endpoints
+@app.route('/api/ips', methods=['GET'])
+def list_ips():
+    """List all IPs in the pool."""
+    try:
+        ips = ip_manager.list_ips()
+        return jsonify({'ips': ips})
+    except Exception as e:
+        logger.error(f"Error listing IPs: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ips', methods=['POST'])
+def add_ip():
+    """Add a new IP to the pool."""
+    try:
+        data = request.json
+        if not data or 'ip' not in data:
+            return jsonify({'error': 'IP address is required'}), 400
+        
+        ip = data['ip']
+        ip_manager.add_ip(ip)
+        return jsonify({'message': f'IP {ip} added to pool'})
+    except Exception as e:
+        logger.error(f"Error adding IP: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ips/<ip>', methods=['DELETE'])
+def remove_ip(ip):
+    """Remove an IP from the pool."""
+    try:
+        ip_manager.remove_ip(ip)
+        return jsonify({'message': f'IP {ip} removed from pool'})
+    except Exception as e:
+        logger.error(f"Error removing IP: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/ips', methods=['GET'])
+def list_machine_ips(cluster, machine):
+    """List IPs attached to a machine."""
+    try:
+        ips = ip_manager.get_machine_ips(machine)
+        return jsonify({'ips': ips})
+    except Exception as e:
+        logger.error(f"Error listing machine IPs: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/ips', methods=['POST'])
+def attach_ip(cluster, machine):
+    """Attach an IP to a machine."""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        # If specific IP is provided, use it (elastic IP case)
+        if 'ip' in data:
+            ip = data['ip']
+            is_elastic = True
+        else:
+            # Get random available IP
+            ip = ip_manager.get_available_ip()
+            if not ip:
+                return jsonify({'error': 'No available IPs in pool'}), 400
+            is_elastic = False
+
+        ip_manager.attach_ip(ip, machine, is_elastic)
+        return jsonify({
+            'message': f'IP {ip} attached to machine {machine}',
+            'ip': ip
+        })
+    except Exception as e:
+        logger.error(f"Error attaching IP: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/ips/<ip>', methods=['DELETE'])
+def detach_ip(cluster, machine, ip):
+    """Detach an IP from a machine."""
+    try:
+        ip_manager.detach_ip(ip)
+        return jsonify({'message': f'IP {ip} detached from machine {machine}'})
+    except Exception as e:
+        logger.error(f"Error detaching IP: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+# Disk Management Endpoints
+@app.route('/api/disks', methods=['GET'])
+def list_disks():
+    """List all disks."""
+    try:
+        disks = vm_manager.list_disks()
+        return jsonify({'disks': disks})
+    except Exception as e:
+        logger.error(f"Error listing disks: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/disks', methods=['POST'])
+def create_disk():
+    """Create a new disk."""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        name = data.get('name')
+        size_gb = data.get('size_gb')
+
+        if not name or not size_gb:
+            return jsonify({'error': 'Name and size are required'}), 400
+
+        try:
+            size_gb = int(size_gb)
+            if size_gb <= 0:
+                raise ValueError()
+        except ValueError:
+            return jsonify({'error': 'Size must be a positive integer'}), 400
+
+        disk = vm_manager.create_disk(name, size_gb)
+        return jsonify({'disk': disk})
+    except Exception as e:
+        logger.error(f"Error creating disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/disks/<disk_id>', methods=['DELETE'])
+def delete_disk(disk_id):
+    """Delete a disk."""
+    try:
+        vm_manager.delete_disk(disk_id)
+        return jsonify({'message': f'Disk {disk_id} deleted successfully'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception as e:
+        logger.error(f"Error deleting disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/disks/<disk_id>/attach', methods=['POST'])
+def attach_disk(disk_id):
+    """Attach a disk to a VM."""
+    try:
+        data = request.json
+        if not data or 'vm_name' not in data:
+            return jsonify({'error': 'VM name is required'}), 400
+
+        vm_manager.attach_disk(disk_id, data['vm_name'])
+        return jsonify({'message': f'Disk {disk_id} attached to VM {data["vm_name"]}'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error attaching disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/disks/<disk_id>/detach', methods=['POST'])
+def detach_disk(disk_id):
+    """Detach a disk from its VM."""
+    try:
+        vm_manager.detach_disk(disk_id)
+        return jsonify({'message': f'Disk {disk_id} detached successfully'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error detaching disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/disks/<disk_id>/resize', methods=['POST'])
+def resize_disk(disk_id):
+    """Resize a disk."""
+    try:
+        data = request.json
+        if not data or 'size_gb' not in data:
+            return jsonify({'error': 'New size is required'}), 400
+
+        try:
+            size_gb = int(data['size_gb'])
+            if size_gb <= 0:
+                raise ValueError()
+        except ValueError:
+            return jsonify({'error': 'Size must be a positive integer'}), 400
+
+        vm_manager.resize_disk(disk_id, size_gb)
+        return jsonify({'message': f'Disk {disk_id} resized to {size_gb}GB'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error resizing disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_name>/disks', methods=['GET'])
+def list_vm_disks(vm_name):
+    """List all disks attached to a VM."""
+    try:
+        disks = vm_manager.get_machine_disks(vm_name)
+        return jsonify({'disks': disks})
+    except Exception as e:
+        logger.error(f"Error listing VM disks: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/snapshots/multi', methods=['POST'])
+def create_multi_volume_snapshot(cluster, machine):
+    """Create a snapshot of all volumes attached to a machine"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        data = request.json
+        name = data.get('name')
+        description = data.get('description', '')
+        
+        if not name:
+            return jsonify({'error': 'Snapshot name is required'}), 400
+            
+        success = vm_manager.create_snapshot(vm.id, name, description)
+        if success:
+            return jsonify({'message': f'Multi-volume snapshot {name} created successfully'})
+        return jsonify({'error': 'Failed to create multi-volume snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error creating multi-volume snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clusters/<cluster>/machines/<machine>/snapshots/incremental', methods=['POST'])
+def create_incremental_snapshot(cluster, machine):
+    """Create an incremental snapshot that only stores changes since the parent snapshot"""
+    try:
+        vpc = vpc_manager.get_vpc(cluster)
+        if not vpc:
+            return jsonify({'error': f'Cluster {cluster} not found'}), 404
+            
+        vm = None
+        for vm_id, v in vm_manager.vms.items():
+            if v.name == machine and v.config.network_name == cluster:
+                vm = v
+                break
+                
+        if not vm:
+            return jsonify({'error': f'Machine {machine} not found in cluster {cluster}'}), 404
+            
+        data = request.json
+        name = data.get('name')
+        parent_snapshot = data.get('parent_snapshot')
+        description = data.get('description', '')
+        
+        if not name:
+            return jsonify({'error': 'Snapshot name is required'}), 400
+            
+        success = vm_manager.create_incremental_snapshot(vm.id, name, parent_snapshot, description)
+        if success:
+            return jsonify({'message': f'Incremental snapshot {name} created successfully'})
+        return jsonify({'error': 'Failed to create incremental snapshot'}), 500
+    except Exception as e:
+        logger.error(f"Error creating incremental snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
-    # Use eventlet's WSGI server
-    logger.info("Starting server with eventlet WebSocket support...")
-    socketio.run(
-        app,
-        host='0.0.0.0',
-        port=5000,
-        debug=True,
-        use_reloader=False,
-        log_output=True,
-        websocket=True
-    ) 
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False) 
