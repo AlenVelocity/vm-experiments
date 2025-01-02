@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getFirewallRules, createFirewallRule, deleteFirewallRule, getClusters } from "@/lib/api";
+import { getFirewallRules, createFirewallRule, deleteFirewallRule, listVPCs } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,7 +32,7 @@ import { Plus, Trash2 } from "lucide-react";
 
 export default function FirewallPage() {
   const [isOpen, setIsOpen] = useState(false);
-  const [selectedCluster, setSelectedCluster] = useState<string>("");
+  const [selectedVPC, setSelectedVPC] = useState<string>("");
   const [rule, setRule] = useState({
     direction: "inbound",
     protocol: "tcp",
@@ -43,28 +43,28 @@ export default function FirewallPage() {
 
   const queryClient = useQueryClient();
 
-  const { data: clustersData } = useQuery({
-    queryKey: ["clusters"],
+  const { data: vpcsData } = useQuery({
+    queryKey: ["vpcs"],
     queryFn: async () => {
-      const response = await getClusters();
+      const response = await listVPCs();
       return response.data;
     },
   });
 
   const { data: rulesData, isLoading } = useQuery({
-    queryKey: ["firewall-rules", selectedCluster],
+    queryKey: ["firewall-rules", selectedVPC],
     queryFn: async () => {
-      if (!selectedCluster) return { rules: [] };
-      const response = await getFirewallRules(selectedCluster);
+      if (!selectedVPC) return { rules: [] };
+      const response = await getFirewallRules(selectedVPC);
       return response.data;
     },
-    enabled: !!selectedCluster,
+    enabled: !!selectedVPC,
   });
 
   const createRuleMutation = useMutation({
-    mutationFn: (data: typeof rule) => createFirewallRule(selectedCluster, data),
+    mutationFn: (data: typeof rule) => createFirewallRule(selectedVPC, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["firewall-rules", selectedCluster] });
+      queryClient.invalidateQueries({ queryKey: ["firewall-rules", selectedVPC] });
       setIsOpen(false);
       setRule({
         direction: "inbound",
@@ -77,14 +77,14 @@ export default function FirewallPage() {
   });
 
   const deleteRuleMutation = useMutation({
-    mutationFn: (ruleId: string) => deleteFirewallRule(selectedCluster, ruleId),
+    mutationFn: (ruleId: string) => deleteFirewallRule(selectedVPC, ruleId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["firewall-rules", selectedCluster] });
+      queryClient.invalidateQueries({ queryKey: ["firewall-rules", selectedVPC] });
     },
   });
 
   const handleCreate = () => {
-    if (!selectedCluster || !rule.port_range || !rule.source) return;
+    if (!selectedVPC || !rule.port_range || !rule.source) return;
     createRuleMutation.mutate(rule);
   };
 
@@ -93,21 +93,21 @@ export default function FirewallPage() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Firewall Rules</h1>
         <div className="flex items-center gap-4">
-          <Select value={selectedCluster} onValueChange={setSelectedCluster}>
+          <Select value={selectedVPC} onValueChange={setSelectedVPC}>
             <SelectTrigger className="w-[200px]">
-              <SelectValue placeholder="Select cluster" />
+              <SelectValue placeholder="Select VPC" />
             </SelectTrigger>
             <SelectContent>
-              {clustersData?.clusters?.map((cluster: any) => (
-                <SelectItem key={cluster.name} value={cluster.name}>
-                  {cluster.name}
+              {vpcsData?.vpcs?.map((vpc: any) => (
+                <SelectItem key={vpc.name} value={vpc.name}>
+                  {vpc.name}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
           <Dialog open={isOpen} onOpenChange={setIsOpen}>
             <DialogTrigger asChild>
-              <Button disabled={!selectedCluster}>
+              <Button disabled={!selectedVPC}>
                 <Plus className="mr-2 h-4 w-4" />
                 Add Rule
               </Button>
@@ -121,7 +121,9 @@ export default function FirewallPage() {
                   <Label>Direction</Label>
                   <Select
                     value={rule.direction}
-                    onValueChange={(value) => setRule({ ...rule, direction: value })}
+                    onValueChange={(value) =>
+                      setRule({ ...rule, direction: value })
+                    }
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -136,7 +138,9 @@ export default function FirewallPage() {
                   <Label>Protocol</Label>
                   <Select
                     value={rule.protocol}
-                    onValueChange={(value) => setRule({ ...rule, protocol: value })}
+                    onValueChange={(value) =>
+                      setRule({ ...rule, protocol: value })
+                    }
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -152,7 +156,9 @@ export default function FirewallPage() {
                   <Label>Port Range</Label>
                   <Input
                     value={rule.port_range}
-                    onChange={(e) => setRule({ ...rule, port_range: e.target.value })}
+                    onChange={(e) =>
+                      setRule({ ...rule, port_range: e.target.value })
+                    }
                     placeholder="e.g., 80 or 80-443"
                   />
                 </div>
@@ -168,13 +174,17 @@ export default function FirewallPage() {
                   <Label>Description</Label>
                   <Input
                     value={rule.description}
-                    onChange={(e) => setRule({ ...rule, description: e.target.value })}
-                    placeholder="Rule description"
+                    onChange={(e) =>
+                      setRule({ ...rule, description: e.target.value })
+                    }
+                    placeholder="e.g., Allow HTTP traffic"
                   />
                 </div>
                 <Button
                   onClick={handleCreate}
-                  disabled={!rule.port_range || !rule.source || createRuleMutation.isPending}
+                  disabled={
+                    !rule.port_range || !rule.source || createRuleMutation.isPending
+                  }
                 >
                   {createRuleMutation.isPending ? "Adding..." : "Add Rule"}
                 </Button>
@@ -184,8 +194,8 @@ export default function FirewallPage() {
         </div>
       </div>
 
-      {!selectedCluster ? (
-        <div className="text-center text-muted-foreground">Select a cluster to view firewall rules</div>
+      {!selectedVPC ? (
+        <div className="text-center text-muted-foreground">Select a VPC to view firewall rules</div>
       ) : isLoading ? (
         <div>Loading...</div>
       ) : (

@@ -19,9 +19,14 @@ const routes = [
     href: "/dashboard",
   },
   {
-    label: "Clusters",
+    label: "VPC Management",
     icon: Server,
-    href: "/clusters",
+    href: "/vpc-management",
+  },
+  {
+    label: "VM Management",
+    icon: Server,
+    href: "/vm-management",
   },
   {
     label: "Firewall",

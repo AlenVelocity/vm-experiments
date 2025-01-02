@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { listIPs, addIP, removeIP, getClusters, getMachineIPs, attachIP, detachIP } from "@/lib/api";
+import { listIPs, addIP, removeIP, listVPCs, attachIP, detachIP, listVMs } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,8 +33,8 @@ import { Plus, Unlink, Link } from "lucide-react";
 export default function IPManagementPage() {
   const [isOpen, setIsOpen] = useState(false);
   const [newIP, setNewIP] = useState("");
-  const [selectedCluster, setSelectedCluster] = useState<string>("");
-  const [selectedMachine, setSelectedMachine] = useState<string>("");
+  const [selectedVPC, setSelectedVPC] = useState<string>("");
+  const [selectedVM, setSelectedVM] = useState<string>("");
 
   const queryClient = useQueryClient();
 
@@ -46,26 +46,25 @@ export default function IPManagementPage() {
     },
   });
 
-  const { data: clustersData } = useQuery({
-    queryKey: ["clusters"],
+  const { data: vpcsData } = useQuery({
+    queryKey: ["vpcs"],
     queryFn: async () => {
-      const response = await getClusters();
+      const response = await listVPCs();
       return response.data;
     },
   });
 
-  const { data: machineIPsData, isLoading: isLoadingMachineIPs } = useQuery({
-    queryKey: ["machine-ips", selectedCluster, selectedMachine],
+  const { data: vmsData, isLoading: isLoadingVMs } = useQuery({
+    queryKey: ["vms"],
     queryFn: async () => {
-      if (!selectedCluster || !selectedMachine) return { ips: [] };
-      const response = await getMachineIPs(selectedCluster, selectedMachine);
+      const response = await listVMs();
       return response.data;
     },
-    enabled: !!selectedCluster && !!selectedMachine,
+    enabled: !!selectedVPC,
   });
 
   const addIPMutation = useMutation({
-    mutationFn: addIP,
+    mutationFn: (ip: string) => addIP(ip),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["ips"] });
       setIsOpen(false);
@@ -81,26 +80,26 @@ export default function IPManagementPage() {
   });
 
   const attachIPMutation = useMutation({
-    mutationFn: ({ cluster, machine, ip }: { cluster: string; machine: string; ip: string }) =>
-      attachIP(cluster, machine, { ip }),
+    mutationFn: ({ vmId, ip }: { vmId: string; ip: string }) =>
+      attachIP(vmId, ip),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["ips"] });
-      queryClient.invalidateQueries({ queryKey: ["machine-ips"] });
+      queryClient.invalidateQueries({ queryKey: ["vms"] });
     },
   });
 
   const detachIPMutation = useMutation({
-    mutationFn: ({ cluster, machine, ip }: { cluster: string; machine: string; ip: string }) =>
-      detachIP(cluster, machine, ip),
+    mutationFn: ({ vmId, ip }: { vmId: string; ip: string }) =>
+      detachIP(vmId, ip),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["ips"] });
-      queryClient.invalidateQueries({ queryKey: ["machine-ips"] });
+      queryClient.invalidateQueries({ queryKey: ["vms"] });
     },
   });
 
   const handleAddIP = () => {
     if (!newIP) return;
-    addIPMutation.mutate({ ip: newIP });
+    addIPMutation.mutate(newIP);
   };
 
   return (
@@ -138,42 +137,55 @@ export default function IPManagementPage() {
         </Dialog>
       </div>
 
-      <div className="flex gap-4 items-center">
-        <Select value={selectedCluster} onValueChange={setSelectedCluster}>
-          <SelectTrigger className="w-[200px]">
-            <SelectValue placeholder="Select cluster" />
-          </SelectTrigger>
-          <SelectContent>
-            {clustersData?.clusters?.map((cluster: any) => (
-              <SelectItem key={cluster.name} value={cluster.name}>
-                {cluster.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={selectedMachine}
-          onValueChange={setSelectedMachine}
-          disabled={!selectedCluster}
-        >
-          <SelectTrigger className="w-[200px]">
-            <SelectValue placeholder="Select machine" />
-          </SelectTrigger>
-          <SelectContent>
-            {clustersData?.clusters
-              ?.find((c: any) => c.name === selectedCluster)
-              ?.machines?.map((machine: any) => (
-                <SelectItem key={machine.name} value={machine.name}>
-                  {machine.name}
-                </SelectItem>
-              ))}
-          </SelectContent>
-        </Select>
+      <div className="space-y-4">
+        <div className="flex space-x-4">
+          <div className="w-64">
+            <Label>VPC</Label>
+            <Select
+              value={selectedVPC}
+              onValueChange={(value) => {
+                setSelectedVPC(value);
+                setSelectedVM("");
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select a VPC" />
+              </SelectTrigger>
+              <SelectContent>
+                {vpcsData?.vpcs?.map((vpc: any) => (
+                  <SelectItem key={vpc.name} value={vpc.name}>
+                    {vpc.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="w-64">
+            <Label>Virtual Machine</Label>
+            <Select
+              value={selectedVM}
+              onValueChange={setSelectedVM}
+              disabled={!selectedVPC}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select a VM" />
+              </SelectTrigger>
+              <SelectContent>
+                {vmsData?.vms
+                  ?.filter((vm: any) => vm.config.network_name === selectedVPC)
+                  .map((vm: any) => (
+                    <SelectItem key={vm.id} value={vm.id}>
+                      {vm.name}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
       </div>
 
       {isLoadingIPs ? (
-        <div>Loading...</div>
+        <div>Loading IPs...</div>
       ) : (
         <Table>
           <TableHeader>
@@ -186,8 +198,8 @@ export default function IPManagementPage() {
           </TableHeader>
           <TableBody>
             {ipsData?.ips?.map((ip: any) => (
-              <TableRow key={ip.address}>
-                <TableCell>{ip.address}</TableCell>
+              <TableRow key={ip.ip}>
+                <TableCell>{ip.ip}</TableCell>
                 <TableCell>{ip.status}</TableCell>
                 <TableCell>{ip.attached_to || "Not attached"}</TableCell>
                 <TableCell>
@@ -197,12 +209,11 @@ export default function IPManagementPage() {
                       size="icon"
                       onClick={() =>
                         detachIPMutation.mutate({
-                          cluster: selectedCluster,
-                          machine: selectedMachine,
-                          ip: ip.address,
+                          vmId: ip.attached_to,
+                          ip: ip.ip,
                         })
                       }
-                      disabled={!selectedCluster || !selectedMachine || detachIPMutation.isPending}
+                      disabled={detachIPMutation.isPending}
                     >
                       <Unlink className="h-4 w-4" />
                     </Button>
@@ -212,12 +223,11 @@ export default function IPManagementPage() {
                       size="icon"
                       onClick={() =>
                         attachIPMutation.mutate({
-                          cluster: selectedCluster,
-                          machine: selectedMachine,
-                          ip: ip.address,
+                          vmId: selectedVM,
+                          ip: ip.ip,
                         })
                       }
-                      disabled={!selectedCluster || !selectedMachine || attachIPMutation.isPending}
+                      disabled={!selectedVM || attachIPMutation.isPending}
                     >
                       <Link className="h-4 w-4" />
                     </Button>
@@ -225,7 +235,7 @@ export default function IPManagementPage() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => removeIPMutation.mutate(ip.address)}
+                    onClick={() => removeIPMutation.mutate(ip.ip)}
                     disabled={removeIPMutation.isPending}
                     className="ml-2"
                   >

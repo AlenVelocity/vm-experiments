@@ -1,23 +1,23 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { getClusters } from "@/lib/api";
+import { listVPCs } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Server, Shield, HardDrive, Network } from "lucide-react";
 
 export default function DashboardPage() {
-  const { data: clustersData } = useQuery({
-    queryKey: ["clusters"],
+  const { data: vpcsData } = useQuery({
+    queryKey: ["vpcs"],
     queryFn: async () => {
-      const response = await getClusters();
+      const response = await listVPCs();
       return response.data;
     },
   });
 
   const stats = [
     {
-      title: "Total Clusters",
-      value: clustersData?.clusters?.length || 0,
+      title: "Total VPCs",
+      value: vpcsData?.vpcs?.length || 0,
       icon: Server,
     },
     {
