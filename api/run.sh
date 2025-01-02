@@ -6,7 +6,7 @@ if [ -d "../venv" ]; then
 fi
 
 # Set Python path to include the root directory
-export PYTHONPATH=$PYTHONPATH:$(pwd)/..
+export PYTHONPATH=$PYTHONPATH:$(pwd)
 
-# Run the Flask application
-python app/api.py 
+# Run the Flask application as a module
+python -m app.api 

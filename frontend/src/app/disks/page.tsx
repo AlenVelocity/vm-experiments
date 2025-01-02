@@ -9,7 +9,8 @@ import {
   attachDisk,
   detachDisk,
   resizeDisk,
-  getClusters,
+  listVPCs,
+  listVMs,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,12 +44,13 @@ export default function DisksPage() {
   const [isResizeOpen, setIsResizeOpen] = useState(false);
   const [isAttachOpen, setIsAttachOpen] = useState(false);
   const [selectedDisk, setSelectedDisk] = useState<string>("");
+  const [selectedVPC, setSelectedVPC] = useState<string>("");
+  const [selectedVM, setSelectedVM] = useState<string>("");
   const [newDisk, setNewDisk] = useState({
     name: "",
     size_gb: "",
   });
   const [newSize, setNewSize] = useState("");
-  const [selectedMachine, setSelectedMachine] = useState("");
 
   const queryClient = useQueryClient();
 
@@ -60,12 +62,21 @@ export default function DisksPage() {
     },
   });
 
-  const { data: clustersData } = useQuery({
-    queryKey: ["clusters"],
+  const { data: vpcsData } = useQuery({
+    queryKey: ["vpcs"],
     queryFn: async () => {
-      const response = await getClusters();
+      const response = await listVPCs();
       return response.data;
     },
+  });
+
+  const { data: vmsData } = useQuery({
+    queryKey: ["vms", selectedVPC],
+    queryFn: async () => {
+      const response = await listVMs();
+      return response.data;
+    },
+    enabled: !!selectedVPC,
   });
 
   const createDiskMutation = useMutation({
@@ -85,25 +96,26 @@ export default function DisksPage() {
   });
 
   const attachDiskMutation = useMutation({
-    mutationFn: ({ diskId, vmName }: { diskId: string; vmName: string }) =>
-      attachDisk(diskId, { vm_name: vmName }),
+    mutationFn: ({ vmId, diskId }: { vmId: string; diskId: string }) =>
+      attachDisk(vmId, diskId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["disks"] });
       setIsAttachOpen(false);
-      setSelectedMachine("");
+      setSelectedVM("");
     },
   });
 
   const detachDiskMutation = useMutation({
-    mutationFn: detachDisk,
+    mutationFn: ({ vmId, diskId }: { vmId: string; diskId: string }) =>
+      detachDisk(vmId, diskId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["disks"] });
     },
   });
 
   const resizeDiskMutation = useMutation({
-    mutationFn: ({ diskId, size }: { diskId: string; size: number }) =>
-      resizeDisk(diskId, { size_gb: size }),
+    mutationFn: ({ diskId, newSize }: { diskId: string; newSize: number }) =>
+      resizeDisk(diskId, { new_size_gb: newSize }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["disks"] });
       setIsResizeOpen(false);
@@ -123,15 +135,15 @@ export default function DisksPage() {
     if (!selectedDisk || !newSize) return;
     resizeDiskMutation.mutate({
       diskId: selectedDisk,
-      size: parseInt(newSize),
+      newSize: parseInt(newSize),
     });
   };
 
   const handleAttachDisk = () => {
-    if (!selectedDisk || !selectedMachine) return;
+    if (!selectedDisk || !selectedVM) return;
     attachDiskMutation.mutate({
+      vmId: selectedVM,
       diskId: selectedDisk,
-      vmName: selectedMachine,
     });
   };
 
@@ -148,15 +160,17 @@ export default function DisksPage() {
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Create New Disk</DialogTitle>
+              <DialogTitle>Create Disk</DialogTitle>
             </DialogHeader>
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label>Name</Label>
                 <Input
                   value={newDisk.name}
-                  onChange={(e) => setNewDisk({ ...newDisk, name: e.target.value })}
-                  placeholder="my-disk"
+                  onChange={(e) =>
+                    setNewDisk({ ...newDisk, name: e.target.value })
+                  }
+                  placeholder="e.g., data-disk-1"
                 />
               </div>
               <div className="space-y-2">
@@ -164,15 +178,17 @@ export default function DisksPage() {
                 <Input
                   type="number"
                   value={newDisk.size_gb}
-                  onChange={(e) => setNewDisk({ ...newDisk, size_gb: e.target.value })}
-                  placeholder="20"
+                  onChange={(e) =>
+                    setNewDisk({ ...newDisk, size_gb: e.target.value })
+                  }
+                  placeholder="Enter size in GB"
                 />
               </div>
               <Button
                 onClick={handleCreateDisk}
                 disabled={!newDisk.name || !newDisk.size_gb || createDiskMutation.isPending}
               >
-                {createDiskMutation.isPending ? "Creating..." : "Create"}
+                {createDiskMutation.isPending ? "Creating..." : "Create Disk"}
               </Button>
             </div>
           </DialogContent>
@@ -214,7 +230,12 @@ export default function DisksPage() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => detachDiskMutation.mutate(disk.id)}
+                      onClick={() =>
+                        detachDiskMutation.mutate({
+                          vmId: disk.attached_to,
+                          diskId: disk.id,
+                        })
+                      }
                       disabled={detachDiskMutation.isPending}
                     >
                       <Unlink className="h-4 w-4" />
@@ -274,29 +295,48 @@ export default function DisksPage() {
       <Dialog open={isAttachOpen} onOpenChange={setIsAttachOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Attach Disk to Machine</DialogTitle>
+            <DialogTitle>Attach Disk to VM</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label>Select Machine</Label>
-              <Select value={selectedMachine} onValueChange={setSelectedMachine}>
+              <Label>VPC</Label>
+              <Select value={selectedVPC} onValueChange={setSelectedVPC}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select a machine" />
+                  <SelectValue placeholder="Select a VPC" />
                 </SelectTrigger>
                 <SelectContent>
-                  {clustersData?.clusters?.flatMap((cluster: any) =>
-                    (cluster.machines || []).map((machine: any) => (
-                      <SelectItem key={machine.name} value={machine.name}>
-                        {machine.name}
+                  {vpcsData?.vpcs?.map((vpc: any) => (
+                    <SelectItem key={vpc.name} value={vpc.name}>
+                      {vpc.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Virtual Machine</Label>
+              <Select
+                value={selectedVM}
+                onValueChange={setSelectedVM}
+                disabled={!selectedVPC}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a VM" />
+                </SelectTrigger>
+                <SelectContent>
+                  {vmsData?.vms
+                    ?.filter((vm: any) => vm.config.network_name === selectedVPC)
+                    .map((vm: any) => (
+                      <SelectItem key={vm.id} value={vm.id}>
+                        {vm.name}
                       </SelectItem>
-                    ))
-                  )}
+                    ))}
                 </SelectContent>
               </Select>
             </div>
             <Button
               onClick={handleAttachDisk}
-              disabled={!selectedMachine || attachDiskMutation.isPending}
+              disabled={!selectedVM || attachDiskMutation.isPending}
             >
               {attachDiskMutation.isPending ? "Attaching..." : "Attach"}
             </Button>

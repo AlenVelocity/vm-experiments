@@ -14,9 +14,9 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 import libvirt
 import xml.etree.ElementTree as ET
-from networking import NetworkManager, NetworkType
-from ip_manager import IPManager
-from disk_manager import DiskManager
+from .networking import NetworkManager, NetworkType
+from .ip_manager import IPManager
+from .disk_manager import DiskManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -301,10 +301,10 @@ network:
             else:
                 base[key] = value
 
-    def create_vm(self, name: str, vpc_name: str) -> VM:
+    def create_vm(self, config: VMConfig) -> VM:
+        """Create a new VM with the given configuration."""
         vm_id = str(uuid.uuid4())
-        config = VMConfig(name=name, network_name=vpc_name)
-        vm = VM(id=vm_id, name=name, config=config)
+        vm = VM(id=vm_id, name=config.name, config=config)
         vm_path = self.vm_dir / vm_id
         vm_path.mkdir(parents=True, exist_ok=True)
         vm.ssh_port = self._find_free_port()
@@ -314,7 +314,7 @@ network:
         if public_ip:
             self.ip_manager.attach_ip(public_ip, vm_id)
         else:
-            logger.warning(f"No available public IPs for VM {name}")
+            logger.warning(f"No available public IPs for VM {config.name}")
             public_ip = None
 
         # Generate unique network information
@@ -328,7 +328,7 @@ network:
                 'ip': f"192.168.{subnet}.{host}",
                 'subnet_mask': "255.255.255.0",
                 'gateway': f"192.168.{subnet}.1",
-                'network_name': f"{vpc_name}-private"
+                'network_name': f"{config.network_name}-private" if config.network_name else "default-private"
             }
         }
 
@@ -338,7 +338,7 @@ network:
                 'ip': public_ip,
                 'subnet_mask': "255.255.255.0",
                 'gateway': f"10.{subnet}.{host}.1",
-                'network_name': f"{vpc_name}-public"
+                'network_name': f"{config.network_name}-public" if config.network_name else "default-public"
             }
 
         # Save VM configuration
@@ -968,3 +968,87 @@ VNC access available at:
             
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to create incremental snapshot: {str(e)}")
+
+    def _create_vm_disk(self, vm: VM) -> None:
+        """Create a disk for the VM using qemu-img."""
+        try:
+            # Get the storage pool
+            pool = self.conn.storagePoolLookupByName('default')
+            if not pool.isActive():
+                pool.create()
+
+            # On macOS, we need to use getXMLDesc to get pool info
+            pool_xml = pool.XMLDesc(0)
+            import xml.etree.ElementTree as ET
+            pool_root = ET.fromstring(pool_xml)
+            pool_path = pool_root.find('.//path').text
+            disk_path = Path(pool_path) / f"{vm.name}.qcow2"
+
+            # Create a new disk using qemu-img
+            subprocess.run([
+                'qemu-img', 'create',
+                '-f', 'qcow2',
+                str(disk_path),
+                f"{vm.config.disk_size_gb}G"
+            ], check=True)
+
+            # Download Ubuntu cloud image if not exists
+            ubuntu_img = self.vm_dir / "ubuntu-22.04-server-cloudimg-arm64.img"
+            if not ubuntu_img.exists():
+                logger.info("Downloading Ubuntu cloud image...")
+                response = requests.get(
+                    "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-arm64.img",
+                    stream=True
+                )
+                response.raise_for_status()
+                with open(ubuntu_img, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+            # Convert and resize the Ubuntu image to our disk
+            subprocess.run([
+                'qemu-img', 'convert',
+                '-f', 'qcow2',
+                '-O', 'qcow2',
+                str(ubuntu_img),
+                str(disk_path)
+            ], check=True)
+
+            # Resize the disk to the specified size
+            subprocess.run([
+                'qemu-img', 'resize',
+                str(disk_path),
+                f"{vm.config.disk_size_gb}G"
+            ], check=True)
+
+            logger.info(f"Created disk for VM {vm.name} at {disk_path}")
+        except subprocess.CalledProcessError as e:
+            raise Exception(f"Failed to create VM disk: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to download Ubuntu image: {str(e)}")
+        except Exception as e:
+            raise Exception(f"Failed to create VM disk: {str(e)}")
+
+    def _start_vm(self, vm: VM) -> None:
+        """Start the VM using libvirt."""
+        try:
+            # Get the storage pool
+            pool = self.conn.storagePoolLookupByName('default')
+            if not pool.isActive():
+                pool.create()
+
+            # Get the disk path
+            disk_path = Path(pool.getInfo()[0]) / f"{vm.name}.qcow2"
+
+            # Generate the domain XML
+            domain_xml = self._generate_domain_xml(vm, disk_path)
+
+            # Create and start the domain
+            domain = self.conn.defineXML(domain_xml)
+            if not domain:
+                raise Exception("Failed to define domain")
+
+            domain.create()
+            logger.info(f"Started VM {vm.name}")
+        except Exception as e:
+            raise Exception(f"Failed to start VM: {str(e)}")

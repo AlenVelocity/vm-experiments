@@ -1,8 +1,8 @@
 {
   "192.168.0.0": {
-    "status": "available",
-    "attached_to": null,
+    "status": "in_use",
+    "attached_to": "ba757d2d-4ded-4dda-8039-890ef4deea8d",
     "is_elastic": false,
-    "interface": null
+    "interface": "eth86"
   }
 }

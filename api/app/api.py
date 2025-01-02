@@ -27,15 +27,11 @@ import eventlet.websocket
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Add parent directory to Python path to import VPC and VM modules
-root_dir = Path(__file__).parent.parent.parent
-sys.path.append(str(root_dir))
-
-# Import after adding to path
-from vpc import VPCManager
-from vm import LibvirtManager
-from ip_manager import IPManager
-from firewall import FirewallManager
+# Import local modules
+from .vm import LibvirtManager, VMConfig, VM
+from .vpc import VPCManager
+from .ip_manager import IPManager
+from .firewall import FirewallManager
 
 app = Flask(__name__)
 CORS(app)
@@ -281,7 +277,7 @@ def delete_vpc(name):
 
 # VM Routes
 @app.route('/api/vms/list', methods=['GET'])
-def list_vms():
+def list_vms_legacy():
     try:
         vms_list = []
         for vm_id, vm in vm_manager.vms.items():
@@ -314,49 +310,33 @@ def list_vms():
 def create_vm():
     try:
         data = request.json
-        name = data.get('name')
-        vpc_name = data.get('vpc')
-        cloud_init = data.get('cloud_init')  # Optional cloud-init configuration
-        
-        if not name or not vpc_name:
-            return jsonify({'error': 'VM name and VPC are required'}), 400
-        
-        # Check if VPC exists first
-        vpc = vpc_manager.get_vpc(vpc_name)
-        if not vpc:
-            return jsonify({'error': f'VPC {vpc_name} does not exist'}), 404
-            
-        # Check if Ubuntu image exists before downloading
-        img_file = vm_manager.vm_dir / "ubuntu-20.04-server-cloudimg-arm64.img"
-        if not img_file.exists():
-            logger.info("Ubuntu image not found, downloading...")
-            try:
-                vm_manager.download_ubuntu_iso()
-            except requests.exceptions.ConnectionError as e:
-                error_msg = "Failed to download Ubuntu image: Connection error. Please check your internet connection and try again."
-                logger.error(f"{error_msg} Details: {str(e)}")
-                return jsonify({'error': error_msg}), 503
-            except Exception as e:
-                error_msg = f"Failed to download Ubuntu image: {str(e)}"
-                logger.error(error_msg)
-                return jsonify({'error': error_msg}), 500
-        else:
-            logger.info("Ubuntu image already exists, skipping download")
-        
-        # Create VM config with cloud-init if provided
+        if not data or not data.get('name'):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        # Create VM config
         config = VMConfig(
-            name=name,
-            network_name=vpc_name,
-            cloud_init=cloud_init
+            name=data['name'],
+            cpu_cores=data.get('cpu_cores', 2),
+            memory_mb=data.get('memory_mb', 2048),
+            disk_size_gb=data.get('disk_size_gb', 20),
+            network_name=data.get('network_name'),
+            cloud_init=data.get('cloud_init')
         )
-        
+
         # Create the VM
-        vm = vm_manager.create_vm(name, vpc_name, config)
+        vm = vm_manager.create_vm(config)
         
-        return jsonify({'message': f'VM {name} created successfully in VPC {vpc_name}'})
+        return jsonify({
+            'id': vm.id,
+            'name': vm.name,
+            'status': 'created',
+            'network_info': vm.network_info,
+            'ssh_port': vm.ssh_port
+        })
+
     except Exception as e:
         logger.error(f"Error creating VM: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/vms/<name>/start', methods=['POST'])
@@ -1344,6 +1324,199 @@ def create_incremental_snapshot(cluster, machine):
         return jsonify({'error': 'Failed to create incremental snapshot'}), 500
     except Exception as e:
         logger.error(f"Error creating incremental snapshot: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/disks', methods=['POST'])
+def attach_disk_to_vm(vm_id):
+    """Attach a disk to a VM"""
+    try:
+        data = request.json
+        disk_id = data.get('disk_id')
+        
+        if not disk_id:
+            return jsonify({'error': 'Disk ID is required'}), 400
+            
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        vm_manager.attach_disk(disk_id, vm.name)
+        return jsonify({'message': f'Disk {disk_id} attached to VM {vm.name} successfully'})
+    except Exception as e:
+        logger.error(f"Error attaching disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/disks/<disk_id>', methods=['DELETE'])
+def detach_disk_from_vm(vm_id, disk_id):
+    """Detach a disk from a VM"""
+    try:
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        vm_manager.detach_disk(disk_id)
+        return jsonify({'message': f'Disk {disk_id} detached successfully'})
+    except Exception as e:
+        logger.error(f"Error detaching disk: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/ips', methods=['POST'])
+def attach_ip_to_vm(vm_id):
+    """Attach an IP to a VM"""
+    try:
+        data = request.json
+        ip = data.get('ip')  # Optional - if not provided, will get from pool
+        
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        if ip:
+            # Attach specific IP
+            ip_manager.attach_ip(ip, vm_id)
+            assigned_ip = ip
+        else:
+            # Get IP from pool
+            assigned_ip = ip_manager.get_available_ip()
+            if not assigned_ip:
+                return jsonify({'error': 'No available IPs in pool'}), 400
+            ip_manager.attach_ip(assigned_ip, vm_id)
+            
+        return jsonify({
+            'message': f'IP {assigned_ip} attached to VM {vm.name} successfully',
+            'ip': assigned_ip
+        })
+    except Exception as e:
+        logger.error(f"Error attaching IP: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/ips/<ip>', methods=['DELETE'])
+def detach_ip_from_vm(vm_id, ip):
+    """Detach an IP from a VM"""
+    try:
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        ip_manager.detach_ip(ip)
+        return jsonify({'message': f'IP {ip} detached successfully'})
+    except Exception as e:
+        logger.error(f"Error detaching IP: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/resize', methods=['POST'])
+def resize_vm(vm_id):
+    """Resize a VM's resources"""
+    try:
+        data = request.json
+        cpu_cores = data.get('cpu_cores')
+        memory_mb = data.get('memory_mb')
+        
+        if not cpu_cores and not memory_mb:
+            return jsonify({'error': 'Either CPU cores or memory must be specified'}), 400
+            
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        # Update VM configuration
+        if cpu_cores:
+            vm.config.cpu_cores = cpu_cores
+        if memory_mb:
+            vm.config.memory_mb = memory_mb
+            
+        # Restart VM to apply changes
+        vm_manager.stop_vm(vm_id)
+        vm_manager.start_vm(vm_id)
+        
+        return jsonify({
+            'message': f'VM {vm.name} resized successfully',
+            'vm': {
+                'id': vm.id,
+                'name': vm.name,
+                'cpu_cores': vm.config.cpu_cores,
+                'memory_mb': vm.config.memory_mb
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error resizing VM: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/console', methods=['GET'])
+def get_vm_console(vm_id):
+    """Get VM console connection details"""
+    try:
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        status = vm_manager.get_vm_status(vm_id)
+        return jsonify({
+            'console': {
+                'websocket_url': f'ws://localhost:5000/socket.io/?vmName={vm.name}',
+                'vnc_port': status.get('vnc_port'),
+                'ssh_port': status.get('ssh_port')
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error getting console details: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>/metrics', methods=['GET'])
+def get_vm_metrics(vm_id):
+    """Get VM performance metrics"""
+    try:
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        status = vm_manager.get_vm_status(vm_id)
+        return jsonify({
+            'metrics': {
+                'cpu_time': status.get('cpu_time'),
+                'system_time': status.get('system_time'),
+                'actual_memory_mb': status.get('actual_memory_mb'),
+                'available_memory_mb': status.get('available_memory_mb')
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error getting VM metrics: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms', methods=['GET'])
+def get_all_vms():
+    """List all VMs with detailed information"""
+    try:
+        vms = []
+        for vm_id, vm in vm_manager.vms.items():
+            status = vm_manager.get_vm_status(vm_id)
+            disks = vm_manager.get_machine_disks(vm.name)
+            vm_data = {
+                'id': vm.id,
+                'name': vm.name,
+                'status': status,
+                'config': {
+                    'cpu_cores': vm.config.cpu_cores,
+                    'memory_mb': vm.config.memory_mb,
+                    'disk_size_gb': vm.config.disk_size_gb,
+                    'network_name': vm.config.network_name
+                },
+                'network_info': vm.network_info,
+                'ssh_port': vm.ssh_port,
+                'disks': disks
+            }
+            vms.append(vm_data)
+        return jsonify({'vms': vms})
+    except Exception as e:
+        logger.error(f"Error listing VMs: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
