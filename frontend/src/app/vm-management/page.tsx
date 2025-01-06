@@ -14,6 +14,7 @@ import {
   getVMMetrics,
   listDisks,
   listVMs,
+  listImages,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -61,6 +62,7 @@ export default function VMManagementPage() {
     cpu_cores: 2,
     memory_mb: 2048,
     disk_size_gb: 20,
+    image_id: "",
   });
   const [resizeConfig, setResizeConfig] = useState({
     cpu_cores: 0,
@@ -96,6 +98,15 @@ export default function VMManagementPage() {
     },
   });
 
+  // Fetch available images
+  const { data: imagesData } = useQuery({
+    queryKey: ["images"],
+    queryFn: async () => {
+      const response = await listImages();
+      return response.data;
+    },
+  });
+
   // Create VM mutation
   const createVMMutation = useMutation({
     mutationFn: createVM,
@@ -108,6 +119,7 @@ export default function VMManagementPage() {
         cpu_cores: 2,
         memory_mb: 2048,
         disk_size_gb: 20,
+        image_id: "",
       });
     },
   });
@@ -160,7 +172,7 @@ export default function VMManagementPage() {
   });
 
   const handleCreateVM = () => {
-    if (!newVM.name || !newVM.vpc) return;
+    if (!newVM.name || !newVM.vpc || !newVM.image_id) return;
     createVMMutation.mutate(newVM);
   };
 
@@ -229,6 +241,26 @@ export default function VMManagementPage() {
                 </Select>
               </div>
               <div className="space-y-2">
+                <Label>Ubuntu Image</Label>
+                <Select
+                  value={newVM.image_id}
+                  onValueChange={(value) =>
+                    setNewVM({ ...newVM, image_id: value })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select an Ubuntu image" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {imagesData?.images?.map((image: any) => (
+                      <SelectItem key={image.id} value={image.id}>
+                        {image.name} ({new Date(image.date).toLocaleDateString()})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
                 <Label>CPU Cores</Label>
                 <Input
                   type="number"
@@ -276,6 +308,7 @@ export default function VMManagementPage() {
                 disabled={
                   !newVM.name ||
                   !newVM.vpc ||
+                  !newVM.image_id ||
                   createVMMutation.isPending
                 }
               >

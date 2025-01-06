@@ -17,6 +17,10 @@ import xml.etree.ElementTree as ET
 from .networking import NetworkManager, NetworkType
 from .ip_manager import IPManager
 from .disk_manager import DiskManager
+from datetime import datetime
+from bs4 import BeautifulSoup
+import re
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +34,7 @@ class VMConfig:
     disk_size_gb: int = 20
     network_name: Optional[str] = None
     cloud_init: Optional[Dict[str, Any]] = None
+    image_id: Optional[str] = None  # For selecting daily Ubuntu images
 
 @dataclass
 class VM:
@@ -60,6 +65,7 @@ class LibvirtManager:
             self.vms = {}  # Dictionary to store VM instances
             
             logger.info("LibvirtManager initialized successfully")
+            self.ubuntu_daily_base_url = "https://cloud-images.ubuntu.com/focal/current/"
         except Exception as e:
             logger.error(f"Failed to initialize LibvirtManager: {str(e)}")
             raise
@@ -301,65 +307,147 @@ network:
             else:
                 base[key] = value
 
+    def _download_ubuntu_image(self, image_id: str) -> Optional[Path]:
+        """Download Ubuntu daily image."""
+        try:
+            # Create images directory if it doesn't exist
+            images_dir = self.vm_dir / "images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Construct image URL
+            image_url = f"{self.ubuntu_daily_base_url}{image_id}/focal-server-cloudimg-arm64.img"
+            image_path = images_dir / f"ubuntu-{image_id}.img"
+            
+            # Download if not already exists
+            if not image_path.exists():
+                logger.info(f"Downloading Ubuntu image from {image_url}")
+                response = requests.get(image_url, stream=True)
+                response.raise_for_status()
+                
+                with open(image_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        
+            return image_path
+        except Exception as e:
+            logger.error(f"Error downloading Ubuntu image: {e}")
+            return None
+
     def create_vm(self, config: VMConfig) -> VM:
-        """Create a new VM with the given configuration."""
-        vm_id = str(uuid.uuid4())
-        vm = VM(id=vm_id, name=config.name, config=config)
-        vm_path = self.vm_dir / vm_id
-        vm_path.mkdir(parents=True, exist_ok=True)
-        vm.ssh_port = self._find_free_port()
-
-        # Get an available public IP
-        public_ip = self.ip_manager.get_available_ip()
-        if public_ip:
-            self.ip_manager.attach_ip(public_ip, vm_id)
-        else:
-            logger.warning(f"No available public IPs for VM {config.name}")
-            public_ip = None
-
-        # Generate unique network information
-        vm_number = int(vm_id[-4:], 16) % 254  # Use last 4 chars of UUID as hex number
-        subnet = (vm_number // 254) + 1  # Increment subnet for each 254 VMs
-        host = (vm_number % 254) + 1     # Host number 1-254 within subnet
-
-        # Create network information
-        vm.network_info = {
-            'private': {
-                'ip': f"192.168.{subnet}.{host}",
-                'subnet_mask': "255.255.255.0",
-                'gateway': f"192.168.{subnet}.1",
-                'network_name': f"{config.network_name}-private" if config.network_name else "default-private"
+        """Create a new VM."""
+        try:
+            # Create images directory if it doesn't exist
+            images_dir = self.vm_dir / "images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Handle image selection and download
+            if config.image_id and config.image_id != 'default':
+                # It's a daily build
+                image_url = f"https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img"
+                image_path = images_dir / f"ubuntu-{config.image_id}.img"
+            else:
+                # Use default image
+                image_url = "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img"
+                image_path = images_dir / "ubuntu-focal-default.img"
+            
+            # Download image if not exists
+            if not image_path.exists():
+                logger.info(f"Downloading Ubuntu image from {image_url}")
+                try:
+                    response = requests.get(image_url, stream=True)
+                    response.raise_for_status()
+                    
+                    with open(image_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    logger.info(f"Successfully downloaded image to {image_path}")
+                except Exception as e:
+                    logger.error(f"Failed to download image: {e}")
+                    if image_path.exists():
+                        image_path.unlink()
+                    raise
+            
+            # Create VM directory
+            vm_id = str(uuid.uuid4())[:8]
+            vm_dir = self.vm_dir / vm_id
+            vm_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create disk image
+            disk_path = vm_dir / f"{config.name}.qcow2"
+            logger.info(f"Creating disk image at {disk_path}")
+            subprocess.run([
+                'qemu-img', 'create',
+                '-f', 'qcow2',
+                '-F', 'qcow2',
+                '-b', str(image_path),
+                str(disk_path),
+                f"{config.disk_size_gb}G"
+            ], check=True)
+            logger.info("Successfully created disk image")
+            
+            # Create VM instance
+            vm = VM(id=vm_id, name=config.name, config=config)
+            vm.ssh_port = self._find_free_port()
+            
+            # Get an available public IP
+            public_ip = self.ip_manager.get_available_ip()
+            if public_ip:
+                self.ip_manager.attach_ip(public_ip, vm_id)
+            else:
+                logger.warning(f"No available public IPs for VM {config.name}")
+                public_ip = None
+            
+            # Generate unique network information
+            vm_number = int(vm_id[-4:], 16) % 254
+            subnet = (vm_number // 254) + 1
+            host = (vm_number % 254) + 1
+            
+            # Create network information
+            vm.network_info = {
+                'private': {
+                    'ip': f"192.168.{subnet}.{host}",
+                    'subnet_mask': "255.255.255.0",
+                    'gateway': f"192.168.{subnet}.1",
+                    'network_name': f"{config.network_name}-private" if config.network_name else "default-private"
+                }
             }
-        }
-
-        # Add public network info if IP is available
-        if public_ip:
-            vm.network_info['public'] = {
-                'ip': public_ip,
-                'subnet_mask': "255.255.255.0",
-                'gateway': f"10.{subnet}.{host}.1",
-                'network_name': f"{config.network_name}-public" if config.network_name else "default-public"
-            }
-
-        # Save VM configuration
-        with open(vm_path / "config.json", "w") as f:
-            config_dict = {
-                "name": config.name,
-                "cpu_cores": config.cpu_cores,
-                "memory_mb": config.memory_mb,
-                "disk_size_gb": config.disk_size_gb,
-                "network_name": config.network_name,
-                "ssh_port": vm.ssh_port,
-                "network_info": vm.network_info
-            }
-            json.dump(config_dict, f)
-
-        # Create the VM
-        self._create_vm_disk(vm)
-        self._create_cloud_init_config(vm)
-        self._start_vm(vm)
-
-        return vm
+            
+            # Add public network info if IP is available
+            if public_ip:
+                vm.network_info['public'] = {
+                    'ip': public_ip,
+                    'subnet_mask': "255.255.255.0",
+                    'gateway': f"10.{subnet}.{host}.1",
+                    'network_name': f"{config.network_name}-public" if config.network_name else "default-public"
+                }
+            
+            # Save VM configuration
+            with open(vm_dir / "config.json", "w") as f:
+                config_dict = {
+                    "name": config.name,
+                    "cpu_cores": config.cpu_cores,
+                    "memory_mb": config.memory_mb,
+                    "disk_size_gb": config.disk_size_gb,
+                    "network_name": config.network_name,
+                    "ssh_port": vm.ssh_port,
+                    "network_info": vm.network_info,
+                    "image_id": config.image_id
+                }
+                json.dump(config_dict, f)
+            
+            # Create cloud-init config and start VM
+            self._create_cloud_init_config(vm)
+            self._start_vm(vm)
+            
+            # Store VM in manager
+            self.vms[vm_id] = vm
+            
+            return vm
+            
+        except Exception as e:
+            logger.error(f"Error creating VM: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
     def start_vm(self, vm_id: str) -> bool:
         vm = self.vms.get(vm_id)
@@ -993,11 +1081,11 @@ VNC access available at:
             ], check=True)
 
             # Download Ubuntu cloud image if not exists
-            ubuntu_img = self.vm_dir / "ubuntu-22.04-server-cloudimg-arm64.img"
+            ubuntu_img = self.vm_dir / "ubuntu-focal-server-cloudimg-arm64.img"
             if not ubuntu_img.exists():
                 logger.info("Downloading Ubuntu cloud image...")
                 response = requests.get(
-                    "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-arm64.img",
+                    "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img",
                     stream=True
                 )
                 response.raise_for_status()
@@ -1052,3 +1140,50 @@ VNC access available at:
             logger.info(f"Started VM {vm.name}")
         except Exception as e:
             raise Exception(f"Failed to start VM: {str(e)}")
+
+    def _fetch_available_ubuntu_images(self) -> List[dict]:
+        """Fetch available daily Ubuntu 20.04 images."""
+        try:
+            response = requests.get(self.ubuntu_daily_base_url)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            images = []
+            
+            # Look for directories with date pattern
+            for link in soup.find_all('a'):
+                href = link.get('href', '')
+                if re.match(r'\d{8}/', href):  # Match pattern like "20241216/"
+                    date_str = href.rstrip('/')
+                    try:
+                        date = datetime.strptime(date_str, '%Y%m%d')
+                        images.append({
+                            'id': date_str,
+                            'date': date.strftime('%Y-%m-%d'),
+                            'url': f"{self.ubuntu_daily_base_url}{href}",
+                            'name': f"Ubuntu 20.04 LTS ({date.strftime('%Y-%m-%d')})"
+                        })
+                    except ValueError:
+                        continue
+            
+            # Sort by date, most recent first
+            return sorted(images, key=lambda x: x['date'], reverse=True)
+        except Exception as e:
+            logger.error(f"Error fetching Ubuntu images: {e}")
+            return []
+            
+    def list_available_images(self) -> List[dict]:
+        """List all available VM images including daily Ubuntu builds."""
+        # Add default Ubuntu 20.04 ARM64 image
+        images = [{
+            'id': 'default',
+            'date': 'current',
+            'url': 'https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img',
+            'name': 'Ubuntu 20.04 LTS (Default ARM64)'
+        }]
+        
+        # Add daily Ubuntu images
+        ubuntu_images = self._fetch_available_ubuntu_images()
+        images.extend(ubuntu_images)
+        
+        return images
