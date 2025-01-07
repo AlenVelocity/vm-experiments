@@ -4,3 +4,13 @@ requests==2.26.0
 beautifulsoup4==4.9.3
 libvirt-python==7.0.0
 python-qemu==1.0.0 
+pydantic==2.5.2
+python-multipart==0.0.6
+requests==2.31.0
+flask==3.0.0
+flask-cors==4.0.0
+flask-socketio==5.3.6
+python-socketio==5.10.0
+eventlet==0.33.3
+python-dotenv==1.0.0 
+psutil==6.1.0

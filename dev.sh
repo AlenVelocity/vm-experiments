@@ -12,7 +12,7 @@ trap cleanup EXIT
 # Start the Flask API server
 cd api
 source venv/bin/activate
-python run.py &
+sudo python run.py &
 cd ..
 
 # Wait a bit for the API server to start
