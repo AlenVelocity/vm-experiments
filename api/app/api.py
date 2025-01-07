@@ -215,15 +215,13 @@ def list_vpcs():
     try:
         vpcs = vpc_manager.list_vpcs()
         vpc_data = []
-        for vpc_name in vpcs:
-            vpc = vpc_manager.get_vpc(vpc_name)
-            if vpc:
-                vpc_data.append({
-                    'name': vpc.name,
-                    'cidr': vpc.cidr,
-                    'used_private_ips': vpc.used_private_ips,
-                    'used_public_ips': vpc.used_public_ips
-                })
+        for vpc in vpcs:
+            vpc_data.append({
+                'name': vpc.name,
+                'cidr': vpc.cidr,
+                'used_private_ips': vpc.used_private_ips,
+                'used_public_ips': vpc.used_public_ips
+            })
         return jsonify({'vpcs': vpc_data})
     except Exception as e:
         logger.error(f"Error listing VPCs: {str(e)}")
@@ -320,7 +318,8 @@ def create_vm():
             memory_mb=data.get('memory_mb', 2048),
             disk_size_gb=data.get('disk_size_gb', 20),
             network_name=data.get('network_name'),
-            cloud_init=data.get('cloud_init')
+            cloud_init=data.get('cloud_init'),
+            image_id=data.get('image_id')  # Add image_id to config
         )
 
         # Create the VM
@@ -331,7 +330,8 @@ def create_vm():
             'name': vm.name,
             'status': 'created',
             'network_info': vm.network_info,
-            'ssh_port': vm.ssh_port
+            'ssh_port': vm.ssh_port,
+            'image_id': config.image_id
         })
 
     except Exception as e:
@@ -633,14 +633,19 @@ def delete_firewall_rule(cluster, rule):
 def list_images():
     """List available VM images"""
     try:
-        # For now, we only support Ubuntu 20.04 ARM64
-        images = [{
-            'id': 'ubuntu-20.04-arm64',
-            'name': 'Ubuntu 20.04 ARM64',
-            'architecture': 'arm64',
-            'version': '20.04',
-            'type': 'linux'
-        }]
+        # Get daily Ubuntu images
+        images = vm_manager.list_available_images()
+        
+        if not images:
+            # Fallback to default image if no daily images are available
+            images = [{
+                'id': 'ubuntu-20.04-arm64',
+                'name': 'Ubuntu 20.04 ARM64',
+                'architecture': 'arm64',
+                'version': '20.04',
+                'type': 'linux'
+            }]
+            
         return jsonify({'images': images})
     except Exception as e:
         logger.error(f"Error listing images: {str(e)}")

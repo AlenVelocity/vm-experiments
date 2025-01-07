@@ -14,12 +14,16 @@ class VPC:
     name: str
     cidr: str
     subnets: Dict[str, str] = None
+    used_private_ips: Dict[str, str] = None
+    used_public_ips: Dict[str, str] = None
     
     def to_dict(self) -> dict:
         return {
             'name': self.name,
             'cidr': self.cidr,
-            'subnets': self.subnets or {}
+            'subnets': self.subnets or {},
+            'used_private_ips': self.used_private_ips or {},
+            'used_public_ips': self.used_public_ips or {}
         }
 
 class VPCManager:
@@ -38,7 +42,9 @@ class VPCManager:
                     vpc = VPC(
                         name=data['name'],
                         cidr=data['cidr'],
-                        subnets=data.get('subnets', {})
+                        subnets=data.get('subnets', {}),
+                        used_private_ips=data.get('used_private_ips', {}),
+                        used_public_ips=data.get('used_public_ips', {})
                     )
                     vpcs[vpc.name] = vpc
             except Exception as e:
@@ -56,7 +62,13 @@ class VPCManager:
         except ValueError as e:
             raise ValueError(f"Invalid CIDR block: {e}")
             
-        vpc = VPC(name=name, cidr=cidr)
+        vpc = VPC(
+            name=name, 
+            cidr=cidr, 
+            subnets={},
+            used_private_ips={},
+            used_public_ips={}
+        )
         
         # Save to disk
         with open(self.vpc_dir / f"{name}.json", 'w') as f:
