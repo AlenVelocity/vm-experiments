@@ -303,11 +303,21 @@ ethernets:
         """Initialize the default storage pool for QEMU/KVM"""
         try:
             # Try to find existing pool
-            pool = self.conn.storagePoolLookupByName('default')
-            if not pool.isActive():
-                pool.create()
-            return pool
-        except libvirt.libvirtError:
+            try:
+                pool = self.conn.storagePoolLookupByName('default')
+                if pool:
+                    if not pool.isActive():
+                        try:
+                            pool.create()
+                        except libvirt.libvirtError as e:
+                            logger.warning(f"Failed to activate existing pool: {e}")
+                            # If activation fails, try to undefine and recreate
+                            pool.undefine()
+                            raise libvirt.libvirtError("Pool needs recreation")
+                    return pool
+            except libvirt.libvirtError:
+                pass  # Pool doesn't exist or needs recreation
+            
             # Create pool directory in user's home directory for session mode
             pool_path = Path.home() / '.local/share/libvirt/images'
             pool_path.mkdir(parents=True, exist_ok=True)
@@ -332,10 +342,18 @@ ethernets:
             
             # Start the pool
             pool.setAutostart(True)
-            pool.create()
+            try:
+                pool.create()
+            except libvirt.libvirtError as e:
+                logger.error(f"Failed to start storage pool: {e}")
+                raise
             
             logger.info(f"Created default storage pool at {pool_path}")
             return pool
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize storage pool: {e}")
+            raise
 
     def _find_free_port(self, start_port: int = 2222) -> int:
         port = start_port
@@ -430,31 +448,49 @@ ethernets:
             else:
                 base[key] = value
 
-    def _download_ubuntu_image(self, image_id: str) -> Optional[Path]:
-        """Download Ubuntu daily image."""
+    def _download_ubuntu_image(self, image_id: str = 'default') -> Optional[Path]:
+        """Download Ubuntu cloud image with caching."""
         try:
-            # Create images directory if it doesn't exist
-            images_dir = self.vm_dir / "images"
-            images_dir.mkdir(parents=True, exist_ok=True)
+            # Use cached image if available
+            cached_image = self.vm_dir / f"ubuntu-{image_id}.img"
+            if cached_image.exists():
+                logger.info(f"Using cached Ubuntu image: {cached_image}")
+                return cached_image
             
-            # Construct image URL
-            image_url = f"{self.ubuntu_daily_base_url}{image_id}/focal-server-cloudimg-arm64.img"
-            image_path = images_dir / f"ubuntu-{image_id}.img"
+            # Determine image URL
+            if image_id == 'default':
+                image_url = f"{self.ubuntu_daily_base_url}focal-server-cloudimg-arm64.img"
+            else:
+                image_url = f"{self.ubuntu_daily_base_url}{image_id}/focal-server-cloudimg-arm64.img"
             
-            # Download if not already exists
-            if not image_path.exists():
-                logger.info(f"Downloading Ubuntu image from {image_url}")
-                response = requests.get(image_url, stream=True)
-                response.raise_for_status()
-                
-                with open(image_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+            logger.info(f"Downloading Ubuntu image from {image_url}")
+            
+            # Download with progress tracking
+            response = requests.get(image_url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 8192
+            downloaded = 0
+            
+            with open(cached_image, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=block_size):
+                    if chunk:
                         f.write(chunk)
-                        
-            return image_path
+                        downloaded += len(chunk)
+                        if total_size:
+                            percent = int(100 * downloaded / total_size)
+                            if percent % 10 == 0:  # Log every 10%
+                                logger.info(f"Download progress: {percent}%")
+            
+            logger.info(f"Successfully downloaded and cached Ubuntu image at {cached_image}")
+            return cached_image
+            
         except Exception as e:
             logger.error(f"Error downloading Ubuntu image: {e}")
-            return None
+            if 'cached_image' in locals() and cached_image.exists():
+                cached_image.unlink()  # Clean up partial download
+            raise
 
     def _start_vm(self, vm: VM) -> None:
         """Start the VM using libvirt."""
@@ -528,9 +564,11 @@ ethernets:
         return images
 
     def delete_vm(self, vm_id: str) -> None:
+        """Delete a VM with proper cleanup."""
         try:
             vm = self.vms.get(vm_id)
             if not vm:
+                logger.warning(f"VM {vm_id} not found")
                 return
 
             # Stop VM if running
@@ -539,8 +577,8 @@ ethernets:
                 if domain.isActive():
                     domain.destroy()
                 domain.undefine()
-            except libvirt.libvirtError:
-                pass
+            except libvirt.libvirtError as e:
+                logger.warning(f"Error stopping VM domain: {e}")
 
             # Release IP if allocated
             if vm.network_info and 'public' in vm.network_info:
@@ -553,11 +591,21 @@ ethernets:
             # Clean up VM directory
             vm_dir = self.vm_dir / vm_id
             if vm_dir.exists():
-                shutil.rmtree(vm_dir)
+                try:
+                    shutil.rmtree(vm_dir)
+                except Exception as e:
+                    logger.error(f"Error removing VM directory: {e}")
 
             # Remove from database
-            db.delete_vm(vm_id)
-            del self.vms[vm_id]
+            try:
+                db.delete_vm(vm_id)
+            except Exception as e:
+                logger.error(f"Error removing VM from database: {e}")
+
+            # Remove from memory
+            self.vms.pop(vm_id, None)
+
+            logger.info(f"Successfully deleted VM {vm_id}")
 
         except Exception as e:
             logger.error(f"Error deleting VM {vm_id}: {e}")
