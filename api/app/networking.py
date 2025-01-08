@@ -69,27 +69,27 @@ class NetworkManager:
             <network>
                 <name>{name}</name>
                 <bridge name='{bridge_name}'/>
+                <forward mode='nat'/>
                 <ip address='{str(network[1])}' netmask='{str(network.netmask)}'>
                     <dhcp>
                         <range start='{str(network[2])}' end='{str(network[-2])}'/>
                     </dhcp>
                 </ip>
+            </network>
             """
-            
-            if network_type == NetworkType.NAT:
-                xml += """
-                <forward mode='nat'>
-                    <nat>
-                        <port start='1024' end='65535'/>
-                    </nat>
-                </forward>
-                """
-            
-            xml += "</network>"
             
             net = self.conn.networkDefineXML(xml)
             net.setAutostart(True)
             net.create()
+            
+            # Enable IP forwarding
+            subprocess.run(['sudo', 'sysctl', '-w', 'net.ipv4.ip_forward=1'], check=True)
+            subprocess.run(['sudo', 'sysctl', '-w', 'net.ipv4.conf.all.forwarding=1'], check=True)
+            
+            # Save sysctl changes
+            with open('/etc/sysctl.d/99-libvirt.conf', 'w') as f:
+                f.write('net.ipv4.ip_forward=1\n')
+                f.write('net.ipv4.conf.all.forwarding=1\n')
             
             self._load_networks()  # Reload networks
             return True

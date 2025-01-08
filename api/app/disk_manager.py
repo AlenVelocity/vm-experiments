@@ -6,6 +6,8 @@ import libvirt
 import logging
 from dataclasses import dataclass, asdict
 from .db import db
+import os
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +37,21 @@ class DiskManager:
             <capacity unit='G'>{size_gb}</capacity>
             <target>
                 <format type='qcow2'/>
+                <permissions>
+                    <mode>0644</mode>
+                    <owner>{os.getuid()}</owner>
+                    <group>{os.getgid()}</group>
+                </permissions>
             </target>
         </volume>
         """
         volume = pool.createXML(vol_xml, 0)
         if not volume:
             raise Exception("Failed to create disk volume")
+        
+        # Set proper permissions
+        subprocess.run(['sudo', 'chown', f"{os.getuid()}:{os.getgid()}", volume.path()], check=True)
+        subprocess.run(['sudo', 'chmod', '644', volume.path()], check=True)
         
         # Save to database
         db.save_disk({
@@ -101,7 +112,7 @@ class DiskManager:
             # Attach disk
             disk_xml = f"""
             <disk type='file' device='disk'>
-                <driver name='qemu' type='qcow2'/>
+                <driver name='qemu' type='qcow2' cache='none' io='native'/>
                 <source file='{volume.path()}'/>
                 <target dev='{dev}' bus='virtio'/>
             </disk>

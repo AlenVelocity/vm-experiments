@@ -47,13 +47,22 @@ class VM:
 class LibvirtManager:
     def __init__(self):
         try:
-            self.conn = libvirt.open('qemu:///session')
+            # Use system connection for Ubuntu instead of session
+            self.conn = libvirt.open('qemu:///system')
             if not self.conn:
-                raise Exception("Failed to open connection to qemu:///session")
+                raise Exception("Failed to open connection to qemu:///system")
             
-            self.vm_dir = Path(__file__).parent.parent / "vms"
-            self.vm_dir.mkdir(parents=True, exist_ok=True)
+            # Use standard Linux paths
+            self.vm_dir = Path('/var/lib/libvirt/images')
+            if not self.vm_dir.exists():
+                subprocess.run(['sudo', 'mkdir', '-p', str(self.vm_dir)], check=True)
+                subprocess.run(['sudo', 'chown', f"{os.getuid()}:{os.getgid()}", str(self.vm_dir)], check=True)
             
+            # Create images directory for caching
+            self.images_dir = self.vm_dir / "cache"
+            self.images_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Initialize storage pool first
             self._init_storage_pool()
             
             self.network_manager = NetworkManager(self.conn)
@@ -92,6 +101,7 @@ class LibvirtManager:
         return vms
 
     def _create_cloud_init_config(self, vm: VM) -> None:
+        """Create cloud-init configuration files."""
         vm_dir = self.vm_dir / vm.name
         vm_dir.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +109,6 @@ class LibvirtManager:
             'hostname': vm.name,
             'preserve_hostname': False,
             'fqdn': f"{vm.name}.local",
-            'prefer_fqdn_over_hostname': True,
             'users': [{
                 'name': 'ubuntu',
                 'sudo': 'ALL=(ALL) NOPASSWD:ALL',
@@ -116,27 +125,15 @@ class LibvirtManager:
                 'openssh-server',
                 'net-tools',
                 'curl',
-                'wget',
-                'vim',
-                'htop',
-                'iftop',
-                'iotop',
-                'nmon',
-                'sysstat'
+                'wget'
             ],
-            'apt': {
-                'primary': [{
-                    'arches': ['arm64', 'default'],
-                    'uri': 'http://ports.ubuntu.com/ubuntu-ports/'
-                }]
-            },
             'write_files': [
                 {
                     'path': '/etc/netplan/50-cloud-init.yaml',
                     'content': '''network:
     version: 2
     ethernets:
-        enp0s1:
+        ens3:
             dhcp4: true
             dhcp4-overrides:
                 use-dns: true
@@ -145,72 +142,36 @@ class LibvirtManager:
             optional: true
 ''',
                     'permissions': '0644'
-                },
-                {
-                    'path': '/etc/systemd/system/qemu-guest-agent.service.d/override.conf',
-                    'content': '''[Service]
-Restart=always
-RestartSec=0
-''',
-                    'permissions': '0644'
                 }
             ],
             'runcmd': [
-                'systemctl daemon-reload',
                 'systemctl enable qemu-guest-agent',
                 'systemctl start qemu-guest-agent',
                 'systemctl enable ssh',
                 'systemctl start ssh',
-                'netplan apply',
-                'echo "ubuntu:ubuntu" | chpasswd'
-            ],
-            'power_state': {
-                'mode': 'reboot',
-                'timeout': 30,
-                'condition': True
-            },
-            'final_message': "Cloud-init has completed. The system is ready to use."
+                'netplan apply'
+            ]
         }
 
         if vm.config.cloud_init:
             self._merge_cloud_init(default_cloud_init, vm.config.cloud_init)
 
+        # Write cloud-init files
         meta_data = f"""instance-id: {vm.id}
 local-hostname: {vm.name}
-network:
-  version: 2
-  ethernets:
-    enp0s1:
-      dhcp4: true
-      dhcp6: false
 """
         (vm_dir / 'meta-data').write_text(meta_data)
-
-        user_data = "#cloud-config\n" + json.dumps(default_cloud_init, indent=2)
-        (vm_dir / 'user-data').write_text(user_data)
-
-        network_config = """version: 2
-ethernets:
-    enp0s1:
-        dhcp4: true
-        dhcp4-overrides:
-            use-dns: true
-            use-ntp: true
-        dhcp6: false
-        optional: true
-"""
-        (vm_dir / 'network-config').write_text(network_config)
+        (vm_dir / 'user-data').write_text("#cloud-config\n" + json.dumps(default_cloud_init, indent=2))
 
         # Create cloud-init ISO
         subprocess.run([
-            'mkisofs',
+            'genisoimage',  # Use genisoimage on Ubuntu
             '-output', str(self.vm_dir / f"{vm.name}-cloud-init.iso"),
             '-volid', 'cidata',
             '-joliet',
             '-rock',
             str(vm_dir / 'user-data'),
-            str(vm_dir / 'meta-data'),
-            str(vm_dir / 'network-config')
+            str(vm_dir / 'meta-data')
         ], check=True)
 
     def create_vm(self, config: VMConfig) -> VM:
@@ -311,16 +272,17 @@ ethernets:
                             pool.create()
                         except libvirt.libvirtError as e:
                             logger.warning(f"Failed to activate existing pool: {e}")
-                            # If activation fails, try to undefine and recreate
                             pool.undefine()
                             raise libvirt.libvirtError("Pool needs recreation")
                     return pool
             except libvirt.libvirtError:
                 pass  # Pool doesn't exist or needs recreation
             
-            # Create pool directory in user's home directory for session mode
-            pool_path = Path.home() / '.local/share/libvirt/images'
-            pool_path.mkdir(parents=True, exist_ok=True)
+            # Use standard Linux path for libvirt storage
+            pool_path = Path('/var/lib/libvirt/images')
+            if not pool_path.exists():
+                subprocess.run(['sudo', 'mkdir', '-p', str(pool_path)], check=True)
+                subprocess.run(['sudo', 'chown', f"{os.getuid()}:{os.getgid()}", str(pool_path)], check=True)
             
             # Define pool XML
             pool_xml = f"""
@@ -330,6 +292,8 @@ ethernets:
                     <path>{str(pool_path)}</path>
                     <permissions>
                         <mode>0755</mode>
+                        <owner>{os.getuid()}</owner>
+                        <group>{os.getgid()}</group>
                     </permissions>
                 </target>
             </pool>
@@ -368,14 +332,14 @@ ethernets:
 
     def _generate_domain_xml(self, vm: VM, disk_path: Path) -> str:
         """Generate libvirt domain XML for the VM."""
-        root = ET.Element('domain', type='qemu')  # Use QEMU directly for M1
+        root = ET.Element('domain', type='qemu')  # Use QEMU for ARM
         
         # Basic metadata
         ET.SubElement(root, 'name').text = vm.name
         ET.SubElement(root, 'uuid').text = vm.id
         ET.SubElement(root, 'title').text = f"VM {vm.name}"
         
-        # Use aarch64 for M1
+        # Use ARM64 architecture
         os = ET.SubElement(root, 'os')
         ET.SubElement(os, 'type', arch='aarch64', machine='virt').text = 'hvm'
         ET.SubElement(os, 'boot', dev='hd')
@@ -388,20 +352,20 @@ ethernets:
         vcpu = ET.SubElement(root, 'vcpu', placement='static')
         vcpu.text = str(vm.config.cpu_cores)
         
-        # CPU configuration for M1
+        # CPU configuration for ARM
         cpu = ET.SubElement(root, 'cpu', mode='host-passthrough')
         ET.SubElement(cpu, 'topology', sockets='1', cores=str(vm.config.cpu_cores), threads='1')
         
         # Features
         features = ET.SubElement(root, 'features')
-        ET.SubElement(features, 'acpi')
         ET.SubElement(features, 'gic', version='3')
+        ET.SubElement(features, 'acpi')
         
         # Devices
         devices = ET.SubElement(root, 'devices')
         
-        # Emulator
-        ET.SubElement(devices, 'emulator').text = '/opt/homebrew/bin/qemu-system-aarch64'
+        # Emulator - use ARM emulator path
+        ET.SubElement(devices, 'emulator').text = '/usr/bin/qemu-system-aarch64'
         
         # Main disk
         disk = ET.SubElement(devices, 'disk', type='file', device='disk')
@@ -413,7 +377,7 @@ ethernets:
         cloud_init_disk = ET.SubElement(devices, 'disk', type='file', device='cdrom')
         ET.SubElement(cloud_init_disk, 'driver', name='qemu', type='raw')
         ET.SubElement(cloud_init_disk, 'source', file=str(self.vm_dir / f"{vm.name}-cloud-init.iso"))
-        ET.SubElement(cloud_init_disk, 'target', dev='sda', bus='usb')  # Use USB for CDROM on ARM64
+        ET.SubElement(cloud_init_disk, 'target', dev='sda', bus='usb')
         ET.SubElement(cloud_init_disk, 'readonly')
         
         # Add virtio-serial for console
@@ -429,12 +393,12 @@ ethernets:
         
         # Add video device
         video = ET.SubElement(devices, 'video')
-        ET.SubElement(video, 'model', type='virtio', heads='1')
+        ET.SubElement(video, 'model', type='virtio')
         
         # Add network interface with SSH port forwarding
-        interface = ET.SubElement(devices, 'interface', type='user')
+        interface = ET.SubElement(devices, 'interface', type='network')
+        ET.SubElement(interface, 'source', network='default')
         ET.SubElement(interface, 'model', type='virtio')
-        ET.SubElement(interface, 'hostfwd', protocol='tcp', port=str(vm.ssh_port), to='22')
         
         return ET.tostring(root, encoding='unicode', pretty_print=True)
 
@@ -452,16 +416,16 @@ ethernets:
         """Download Ubuntu cloud image with caching."""
         try:
             # Use cached image if available
-            cached_image = self.vm_dir / f"ubuntu-{image_id}.img"
+            cached_image = self.images_dir / f"ubuntu-{image_id}.img"
             if cached_image.exists():
                 logger.info(f"Using cached Ubuntu image: {cached_image}")
                 return cached_image
             
-            # Determine image URL
+            # Determine image URL for ARM64 architecture
             if image_id == 'default':
-                image_url = f"{self.ubuntu_daily_base_url}focal-server-cloudimg-arm64.img"
+                image_url = "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img"
             else:
-                image_url = f"{self.ubuntu_daily_base_url}{image_id}/focal-server-cloudimg-arm64.img"
+                image_url = f"https://cloud-images.ubuntu.com/focal/{image_id}/focal-server-cloudimg-arm64.img"
             
             logger.info(f"Downloading Ubuntu image from {image_url}")
             
@@ -480,8 +444,11 @@ ethernets:
                         downloaded += len(chunk)
                         if total_size:
                             percent = int(100 * downloaded / total_size)
-                            if percent % 10 == 0:  # Log every 10%
+                            if percent % 10 == 0:
                                 logger.info(f"Download progress: {percent}%")
+            
+            # Set appropriate permissions
+            cached_image.chmod(0o644)
             
             logger.info(f"Successfully downloaded and cached Ubuntu image at {cached_image}")
             return cached_image
@@ -489,7 +456,7 @@ ethernets:
         except Exception as e:
             logger.error(f"Error downloading Ubuntu image: {e}")
             if 'cached_image' in locals() and cached_image.exists():
-                cached_image.unlink()  # Clean up partial download
+                cached_image.unlink()
             raise
 
     def _start_vm(self, vm: VM) -> None:
