@@ -122,12 +122,23 @@ class LibvirtManager:
                 'iftop',
                 'iotop',
                 'nmon',
-                'sysstat'
+                'sysstat',
+                'python3',
+                'python3-pip',
+                'python3-venv',
+                'build-essential',
+                'libvirt-dev',
+                'pkg-config',
+                'git'
             ],
             'apt': {
                 'primary': [{
-                    'arches': ['arm64', 'default'],
-                    'uri': 'http://ports.ubuntu.com/ubuntu-ports/'
+                    'arches': ['arm64', 'amd64'],
+                    'uri': 'http://archive.ubuntu.com/ubuntu'
+                }],
+                'security': [{
+                    'arches': ['arm64', 'amd64'],
+                    'uri': 'http://security.ubuntu.com/ubuntu'
                 }]
             },
             'write_files': [
@@ -162,7 +173,11 @@ RestartSec=0
                 'systemctl enable ssh',
                 'systemctl start ssh',
                 'netplan apply',
-                'echo "ubuntu:ubuntu" | chpasswd'
+                'echo "ubuntu:ubuntu" | chpasswd',
+                'apt-get update',
+                'apt-get install -y python3-pip python3-venv libvirt-dev pkg-config',
+                'mkdir -p /opt/api',
+                'chown -R ubuntu:ubuntu /opt/api'
             ],
             'power_state': {
                 'mode': 'reboot',
@@ -401,7 +416,7 @@ ethernets:
         devices = ET.SubElement(root, 'devices')
         
         # Emulator
-        ET.SubElement(devices, 'emulator').text = '/opt/homebrew/bin/qemu-system-aarch64'
+        ET.SubElement(devices, 'emulator').text = '/usr/bin/qemu-system-aarch64'
         
         # Main disk
         disk = ET.SubElement(devices, 'disk', type='file', device='disk')

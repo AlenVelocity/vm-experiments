@@ -1,12 +1,10 @@
-from typing import Dict, List, Optional
+import logging
 import json
 from pathlib import Path
 import subprocess
 import ipaddress
-import logging
 import uuid
-import platform
-import os
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +17,7 @@ class FirewallRule:
         self.port_range = port_range
         self.source = source
         self.description = description
-        self.pf_rule = None
+        self.iptables_rule = None
 
     def to_dict(self) -> dict:
         return {
@@ -29,7 +27,7 @@ class FirewallRule:
             "port_range": self.port_range,
             "source": self.source,
             "description": self.description,
-            "pf_rule": self.pf_rule
+            "iptables_rule": self.iptables_rule
         }
 
     @classmethod
@@ -42,7 +40,7 @@ class FirewallRule:
             source=data["source"],
             description=data.get("description", "")
         )
-        rule.pf_rule = data.get("pf_rule")
+        rule.iptables_rule = data.get("iptables_rule")
         return rule
 
 class FirewallManager:
@@ -50,59 +48,32 @@ class FirewallManager:
         self.rules_dir = Path("firewall")
         self.rules_dir.mkdir(parents=True, exist_ok=True)
         self.rules: Dict[str, Dict[str, FirewallRule]] = {}
-        self.pf_conf_path = "/etc/pf.conf"
-        self.pf_anchor = "vm-rules"
+        self.chain_prefix = "VM_RULES"
         self._init_firewall()
         self._load_rules()
 
     def _init_firewall(self) -> None:
         try:
-            # Create a backup of the original pf.conf if it doesn't exist
-            if not os.path.exists(f"{self.pf_conf_path}.backup"):
-                subprocess.run(['sudo', 'cp', self.pf_conf_path, f"{self.pf_conf_path}.backup"], check=True)
-
-            # Add our anchor to pf.conf if it's not already there
-            try:
-                conf_content = subprocess.run(['sudo', 'cat', self.pf_conf_path], check=True, capture_output=True, text=True).stdout
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to read pf.conf: {e}")
-                raise
-
-            if f"anchor \"{self.pf_anchor}\"" not in conf_content:
-                # Create a temporary file with the new content
-                temp_conf = Path("/tmp/pf.conf.tmp")
-                temp_conf.write_text(conf_content + f"\nanchor \"{self.pf_anchor}\"\n")
+            # Create our custom chains if they don't exist
+            for direction in ['INPUT', 'OUTPUT']:
+                chain_name = f"{self.chain_prefix}_{direction}"
                 
-                # Use sudo to copy the temporary file to pf.conf
-                subprocess.run(['sudo', 'cp', str(temp_conf), self.pf_conf_path], check=True)
+                # Check if chain exists
+                result = subprocess.run(['sudo', 'iptables', '-L', chain_name], 
+                                     capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    # Create chain
+                    subprocess.run(['sudo', 'iptables', '-N', chain_name], check=True)
+                    
+                    # Add jump rule to built-in chain if not exists
+                    subprocess.run(['sudo', 'iptables', '-C', direction, '-j', chain_name],
+                                 capture_output=True)
+                    if result.returncode != 0:
+                        subprocess.run(['sudo', 'iptables', '-I', direction, '1', '-j', chain_name],
+                                     check=True)
 
-            # Enable PF if it's not already enabled
-            subprocess.run(['sudo', 'pfctl', '-e'], check=False)  # Ignore if already enabled
-            
-            # Create initial anchor rules
-            initial_rules = """# VM Rules
-# Default policy
-block return in all
-block return out all
-
-# Allow established connections
-pass in quick proto tcp from any to any flags S/SA keep state
-pass out quick proto tcp from any to any flags S/SA keep state
-
-# Allow basic outbound connectivity
-pass out quick proto tcp from any to any keep state
-pass out quick proto udp from any to any keep state
-pass out quick proto icmp from any to any keep state
-"""
-            
-            # Write initial rules to a temporary file
-            temp_rules_file = Path("/tmp/pf_initial_rules")
-            temp_rules_file.write_text(initial_rules)
-            
-            # Load the rules into our anchor
-            subprocess.run(['sudo', 'pfctl', '-a', self.pf_anchor, '-f', str(temp_rules_file)], check=True)
-            
-            logger.info("Initialized PF firewall rules")
+            logger.info("Initialized iptables firewall rules")
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to initialize firewall: {e}")
@@ -117,7 +88,7 @@ pass out quick proto icmp from any to any keep state
                 for rule_id, rule_data in rules_data.items():
                     rule = FirewallRule.from_dict(rule_data)
                     self.rules[cluster_id][rule_id] = rule
-                    if rule.pf_rule:
+                    if rule.iptables_rule:
                         try:
                             self._apply_rule(cluster_id, rule)
                         except Exception as e:
@@ -132,45 +103,41 @@ pass out quick proto icmp from any to any keep state
                 indent=2
             )
 
-    def _build_pf_rule(self, rule: FirewallRule) -> str:
-        direction = "in" if rule.direction == "inbound" else "out"
-        action = "pass"
+    def _build_iptables_rule(self, rule: FirewallRule) -> List[str]:
+        # Determine chain based on direction
+        chain = f"{self.chain_prefix}_INPUT" if rule.direction == "inbound" else f"{self.chain_prefix}_OUTPUT"
         
         # Handle port range
         ports = rule.port_range.split("-")
         if len(ports) == 1:
-            port_spec = f"port {ports[0]}"
+            port_spec = f"--dport {ports[0]}"
         else:
-            port_spec = f"port {ports[0]}:{ports[1]}"
+            port_spec = f"--dport {ports[0]}:{ports[1]}"
         
-        # Build the rule
-        pf_rule = f"{action} {direction} proto {rule.protocol} from {rule.source} to any {port_spec}"
+        # Build the base rule
+        iptables_rule = [
+            'sudo', 'iptables',
+            '-A', chain,
+            '-p', rule.protocol,
+            '-s', rule.source,
+            port_spec,
+            '-m', 'comment',
+            '--comment', f"id:{rule.rule_id}",
+            '-j', 'ACCEPT'
+        ]
         
-        # Add rule ID as a comment
-        pf_rule += f" # id:{rule.rule_id}"
-        
-        return pf_rule
+        return iptables_rule
 
     def _apply_rule(self, cluster_id: str, rule: FirewallRule) -> None:
         try:
-            # Build the PF rule
-            pf_rule = self._build_pf_rule(rule)
-            rule.pf_rule = pf_rule
+            # Build the iptables rule
+            iptables_rule = self._build_iptables_rule(rule)
+            rule.iptables_rule = ' '.join(iptables_rule)
             
-            # Write all rules to a temporary file
-            temp_rules_file = Path("/tmp/pf_rules")
-            all_rules = []
-            for cluster_rules in self.rules.values():
-                for r in cluster_rules.values():
-                    if r.pf_rule:
-                        all_rules.append(r.pf_rule)
+            # Apply the rule
+            subprocess.run(iptables_rule, check=True)
             
-            temp_rules_file.write_text("\n".join(all_rules))
-            
-            # Load the rules into our anchor
-            subprocess.run(['sudo', 'pfctl', '-a', self.pf_anchor, '-f', str(temp_rules_file)], check=True)
-            
-            logger.info(f"Applied firewall rule: {pf_rule}")
+            logger.info(f"Applied firewall rule: {rule.iptables_rule}")
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to apply firewall rule: {e}")
@@ -178,25 +145,17 @@ pass out quick proto icmp from any to any keep state
 
     def _remove_rule(self, cluster_id: str, rule: FirewallRule) -> None:
         try:
-            if not rule.pf_rule:
-                logger.warning(f"No PF rule found for {rule.rule_id}")
+            if not rule.iptables_rule:
+                logger.warning(f"No iptables rule found for {rule.rule_id}")
                 return
             
-            # Remove the rule by reapplying all rules except this one
-            rule.pf_rule = None
+            # Convert the stored rule string to list and change -A to -D
+            rule_parts = rule.iptables_rule.split()
+            rule_parts[rule_parts.index('-A')] = '-D'
             
-            # Write remaining rules to a temporary file
-            temp_rules_file = Path("/tmp/pf_rules")
-            all_rules = []
-            for cluster_rules in self.rules.values():
-                for r in cluster_rules.values():
-                    if r.pf_rule:
-                        all_rules.append(r.pf_rule)
-            
-            temp_rules_file.write_text("\n".join(all_rules))
-            
-            # Load the rules into our anchor
-            subprocess.run(['sudo', 'pfctl', '-a', self.pf_anchor, '-f', str(temp_rules_file)], check=True)
+            # Remove the rule
+            subprocess.run(rule_parts, check=True)
+            rule.iptables_rule = None
             
             logger.info(f"Removed firewall rule: {rule.rule_id}")
             
@@ -253,6 +212,4 @@ pass out quick proto icmp from any to any keep state
         return [rule.to_dict() for rule in self.rules[cluster_id].values()]
 
     def get_rule(self, cluster_id: str, rule_id: str) -> Optional[FirewallRule]:
-        if cluster_id not in self.rules or rule_id not in self.rules[cluster_id]:
-            return None
-        return self.rules[cluster_id][rule_id] 
+        return self.rules.get(cluster_id, {}).get(rule_id) 

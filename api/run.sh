@@ -1,12 +1,40 @@
 #!/bin/bash
 
-# Activate virtual environment if it exists
-if [ -d "../venv" ]; then
-    source ../venv/bin/activate
+# Exit on error
+set -e
+
+# Create virtual environment if it doesn't exist
+if [ ! -d "venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv venv
 fi
 
-# Set Python path to include the root directory
+# Activate virtual environment
+source venv/bin/activate
+
+# Install/upgrade pip
+python -m pip install --upgrade pip
+
+# Install requirements
+echo "Installing requirements..."
+pip install -r requirements.txt
+
+# Set environment variables
+export FLASK_APP=app.api
+export FLASK_ENV=production
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
-# Run the Flask application as a module
-python -m app.api 
+# Check if libvirt is installed
+if ! command -v virsh &> /dev/null; then
+    echo "libvirt not found. Please install libvirt-dev package."
+    exit 1
+fi
+
+# Create necessary directories
+mkdir -p data/vms
+mkdir -p data/disks
+mkdir -p data/networks
+
+# Run the Flask application
+echo "Starting API server..."
+python -m flask run --host=0.0.0.0 --port=5000 
