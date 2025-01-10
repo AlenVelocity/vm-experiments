@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { createVPC, listVPCs } from "@/lib/api";
+import { createDisk, listDisks } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -22,42 +22,42 @@ import {
 } from "@/components/ui/card";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { Plus, Network } from "lucide-react";
+import { Plus, HardDrive } from "lucide-react";
 
-export default function VPCManagementPage() {
+export default function DiskManagementPage() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newVPC, setNewVPC] = useState({
+  const [newDisk, setNewDisk] = useState({
     name: "",
-    cidr: "10.0.0.0/16",
+    size_gb: 20,
   });
 
   const queryClient = useQueryClient();
 
-  // Fetch VPCs
-  const { data: vpcsData, isLoading, error } = useQuery({
-    queryKey: ["vpcs"],
+  // Fetch disks
+  const { data: disksData, isLoading, error } = useQuery({
+    queryKey: ["disks"],
     queryFn: async () => {
-      const response = await listVPCs();
+      const response = await listDisks();
       return response.data;
     },
   });
 
-  // Create VPC mutation
-  const createVPCMutation = useMutation({
-    mutationFn: createVPC,
+  // Create disk mutation
+  const createDiskMutation = useMutation({
+    mutationFn: createDisk,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["vpcs"] });
+      queryClient.invalidateQueries({ queryKey: ["disks"] });
       setIsCreateOpen(false);
-      setNewVPC({
+      setNewDisk({
         name: "",
-        cidr: "10.0.0.0/16",
+        size_gb: 20,
       });
     },
   });
 
-  const handleCreateVPC = () => {
-    if (!newVPC.name || !newVPC.cidr) return;
-    createVPCMutation.mutate(newVPC);
+  const handleCreateDisk = () => {
+    if (!newDisk.name) return;
+    createDiskMutation.mutate(newDisk);
   };
 
   if (isLoading) {
@@ -71,7 +71,7 @@ export default function VPCManagementPage() {
   if (error) {
     return (
       <div className="p-4">
-        <ErrorMessage message="Failed to load VPCs. Please try again later." />
+        <ErrorMessage message="Failed to load disks. Please try again later." />
       </div>
     );
   }
@@ -79,56 +79,61 @@ export default function VPCManagementPage() {
   return (
     <div className="p-4 space-y-4">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold">VPC Management</h1>
+        <h1 className="text-2xl font-bold">Disk Management</h1>
         <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
           <DialogTrigger asChild>
             <Button>
               <Plus className="mr-2 h-4 w-4" />
-              Create VPC
+              Create Disk
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Create Virtual Private Cloud</DialogTitle>
+              <DialogTitle>Create Disk</DialogTitle>
             </DialogHeader>
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label>Name</Label>
                 <Input
-                  value={newVPC.name}
+                  value={newDisk.name}
                   onChange={(e) =>
-                    setNewVPC({ ...newVPC, name: e.target.value })
+                    setNewDisk({ ...newDisk, name: e.target.value })
                   }
-                  placeholder="e.g., production-vpc"
+                  placeholder="e.g., data-disk-1"
                 />
               </div>
               <div className="space-y-2">
-                <Label>CIDR Block</Label>
+                <Label>Size (GB)</Label>
                 <Input
-                  value={newVPC.cidr}
+                  type="number"
+                  value={newDisk.size_gb}
                   onChange={(e) =>
-                    setNewVPC({ ...newVPC, cidr: e.target.value })
+                    setNewDisk({
+                      ...newDisk,
+                      size_gb: parseInt(e.target.value),
+                    })
                   }
-                  placeholder="e.g., 10.0.0.0/16"
+                  min={10}
+                  max={1000}
                 />
               </div>
               <Button
-                onClick={handleCreateVPC}
-                disabled={createVPCMutation.isPending}
+                onClick={handleCreateDisk}
+                disabled={createDiskMutation.isPending}
                 className="w-full"
               >
-                {createVPCMutation.isPending ? (
+                {createDiskMutation.isPending ? (
                   <LoadingSpinner className="mr-2" />
                 ) : (
                   <Plus className="mr-2 h-4 w-4" />
                 )}
-                Create VPC
+                Create Disk
               </Button>
-              {createVPCMutation.isError && (
+              {createDiskMutation.isError && (
                 <ErrorMessage
                   message={
-                    createVPCMutation.error?.message ||
-                    "Failed to create VPC. Please try again."
+                    createDiskMutation.error?.message ||
+                    "Failed to create disk. Please try again."
                   }
                 />
               )}
@@ -138,16 +143,16 @@ export default function VPCManagementPage() {
       </div>
 
       <div className="grid gap-4">
-        {vpcsData?.vpcs?.map((vpc: any) => (
-          <Card key={vpc.id}>
+        {disksData?.disks?.map((disk: any) => (
+          <Card key={disk.id}>
             <CardHeader>
               <CardTitle className="flex items-center">
-                <Network className="mr-2 h-4 w-4" />
-                <span>{vpc.name}</span>
+                <HardDrive className="mr-2 h-4 w-4" />
+                <span>{disk.name}</span>
               </CardTitle>
               <CardDescription>
-                CIDR: {vpc.cidr}
-                {vpc.vm_count > 0 && ` • VMs: ${vpc.vm_count}`}
+                Size: {disk.size_gb}GB
+                {disk.attached_to && ` • Attached to: ${disk.attached_to}`}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -156,11 +161,22 @@ export default function VPCManagementPage() {
                   variant="outline"
                   size="sm"
                   onClick={() => {
-                    // TODO: Implement VPC deletion (only if no VMs are attached)
+                    // TODO: Implement disk resize
                   }}
                 >
-                  Delete
+                  Resize
                 </Button>
+                {!disk.attached_to && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      // TODO: Implement disk deletion
+                    }}
+                  >
+                    Delete
+                  </Button>
+                )}
               </div>
             </CardContent>
           </Card>

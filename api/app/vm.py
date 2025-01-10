@@ -659,3 +659,236 @@ ethernets:
     def get_machine_disks(self, vm_name: str) -> List[Dict]:
         """Get all disks attached to a VM."""
         return self.disk_manager.get_machine_disks(vm_name)
+
+    def list_vms(self) -> List[VM]:
+        """List all VMs with their current status"""
+        vms = []
+        for vm_id, vm in self.vms.items():
+            vm.status = self.get_vm_status(vm_id)
+            vms.append(vm)
+        return vms
+
+    def get_vm(self, vm_id: str) -> Optional[VM]:
+        """Get a VM by its ID"""
+        return self.vms.get(vm_id)
+
+    def get_vm_status(self, vm_id: str) -> str:
+        """Get the current status of a VM"""
+        try:
+            vm = self.vms.get(vm_id)
+            if not vm:
+                return 'not_found'
+
+            domain = self.conn.lookupByName(vm.name)
+            if not domain:
+                return 'not_found'
+
+            state, reason = domain.state()
+            states = {
+                libvirt.VIR_DOMAIN_NOSTATE: 'no_state',
+                libvirt.VIR_DOMAIN_RUNNING: 'running',
+                libvirt.VIR_DOMAIN_BLOCKED: 'blocked',
+                libvirt.VIR_DOMAIN_PAUSED: 'paused',
+                libvirt.VIR_DOMAIN_SHUTDOWN: 'shutdown',
+                libvirt.VIR_DOMAIN_SHUTOFF: 'shutoff',
+                libvirt.VIR_DOMAIN_CRASHED: 'crashed',
+                libvirt.VIR_DOMAIN_PMSUSPENDED: 'suspended'
+            }
+            return states.get(state, 'unknown')
+        except libvirt.libvirtError:
+            return 'not_found'
+        except Exception as e:
+            logger.error(f"Error getting VM status: {str(e)}")
+            return 'error'
+
+    def get_metrics(self, vm: VM) -> Dict[str, Any]:
+        """Get current metrics for a VM"""
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            if not domain:
+                raise Exception("VM domain not found")
+
+            # Get CPU stats
+            cpu_stats = domain.getCPUStats(True)[0]
+            cpu_time = cpu_stats.get('cpu_time', 0)
+            system_time = cpu_stats.get('system_time', 0)
+            user_time = cpu_stats.get('user_time', 0)
+
+            # Get memory stats
+            memory_stats = domain.memoryStats()
+            actual = memory_stats.get('actual', 0)
+            available = memory_stats.get('available', 0)
+            unused = memory_stats.get('unused', 0)
+
+            # Get disk stats
+            disk_stats = {}
+            for disk in domain.disks:
+                stats = domain.blockStats(disk)
+                disk_stats[disk] = {
+                    'read_bytes': stats[0],
+                    'read_requests': stats[1],
+                    'write_bytes': stats[2],
+                    'write_requests': stats[3]
+                }
+
+            # Get network stats
+            net_stats = {}
+            for interface in domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT).keys():
+                stats = domain.interfaceStats(interface)
+                net_stats[interface] = {
+                    'rx_bytes': stats[0],
+                    'rx_packets': stats[1],
+                    'rx_errors': stats[2],
+                    'rx_drops': stats[3],
+                    'tx_bytes': stats[4],
+                    'tx_packets': stats[5],
+                    'tx_errors': stats[6],
+                    'tx_drops': stats[7]
+                }
+
+            return {
+                'cpu': {
+                    'total_time': cpu_time,
+                    'system_time': system_time,
+                    'user_time': user_time
+                },
+                'memory': {
+                    'actual': actual,
+                    'available': available,
+                    'unused': unused,
+                    'used': actual - unused if unused else 0
+                },
+                'disk': disk_stats,
+                'network': net_stats
+            }
+        except Exception as e:
+            logger.error(f"Error getting VM metrics: {str(e)}")
+            return {}
+
+    def resize_cpu(self, vm: VM, cpu_cores: int) -> None:
+        """Resize the number of CPU cores for a VM"""
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            if not domain:
+                raise Exception("VM domain not found")
+
+            # Update XML configuration
+            xml = domain.XMLDesc()
+            tree = ET.ElementTree(ET.fromstring(xml))
+            vcpu = tree.find('.//vcpu')
+            if vcpu is not None:
+                vcpu.text = str(cpu_cores)
+                new_xml = ET.tostring(tree.getroot(), encoding='unicode')
+                
+                # Apply new configuration
+                if domain.isActive():
+                    domain.setVcpus(cpu_cores)
+                domain.updateDeviceFlags(new_xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+
+            # Update VM config
+            vm.config.cpu_cores = cpu_cores
+            self._save_vm(vm)
+        except Exception as e:
+            logger.error(f"Error resizing CPU: {str(e)}")
+            raise
+
+    def resize_memory(self, vm: VM, memory_mb: int) -> None:
+        """Resize the memory for a VM"""
+        try:
+            domain = self.conn.lookupByName(vm.name)
+            if not domain:
+                raise Exception("VM domain not found")
+
+            # Update XML configuration
+            xml = domain.XMLDesc()
+            tree = ET.ElementTree(ET.fromstring(xml))
+            memory = tree.find('.//memory')
+            currentMemory = tree.find('.//currentMemory')
+            if memory is not None and currentMemory is not None:
+                memory_kb = memory_mb * 1024
+                memory.text = str(memory_kb)
+                currentMemory.text = str(memory_kb)
+                new_xml = ET.tostring(tree.getroot(), encoding='unicode')
+                
+                # Apply new configuration
+                if domain.isActive():
+                    domain.setMemory(memory_kb)
+                domain.updateDeviceFlags(new_xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+
+            # Update VM config
+            vm.config.memory_mb = memory_mb
+            self._save_vm(vm)
+        except Exception as e:
+            logger.error(f"Error resizing memory: {str(e)}")
+            raise
+
+    def list_images(self) -> List[Dict[str, Any]]:
+        """List available Ubuntu images"""
+        try:
+            response = requests.get(f"{self.ubuntu_daily_base_url}")
+            if response.status_code != 200:
+                raise Exception("Failed to fetch Ubuntu images list")
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            images = []
+            
+            for link in soup.find_all('a'):
+                href = link.get('href')
+                if href and href.endswith('.img'):
+                    match = re.search(r'ubuntu-(\d+\.\d+).*', href)
+                    if match:
+                        version = match.group(1)
+                        images.append({
+                            'id': href,
+                            'name': f"Ubuntu {version}",
+                            'version': version,
+                            'url': f"{self.ubuntu_daily_base_url}{href}"
+                        })
+            
+            return images
+        except Exception as e:
+            logger.error(f"Error listing images: {str(e)}")
+            return []
+
+    def _save_vm(self, vm: VM) -> None:
+        """Save VM configuration to the database"""
+        try:
+            db.update_vm(vm.id, {
+                'name': vm.name,
+                'cpu_cores': vm.config.cpu_cores,
+                'memory_mb': vm.config.memory_mb,
+                'disk_size_gb': vm.config.disk_size_gb,
+                'network_name': vm.config.network_name,
+                'cloud_init': vm.config.cloud_init,
+                'image_id': vm.config.image_id,
+                'network_info': vm.network_info,
+                'ssh_port': vm.ssh_port
+            })
+        except Exception as e:
+            logger.error(f"Error saving VM configuration: {str(e)}")
+            raise
+
+class VMManager:
+    def __init__(self):
+        self.libvirt_manager = LibvirtManager()
+
+    def create_vm(self, config: VMConfig) -> VM:
+        return self.libvirt_manager.create_vm(config)
+
+    def get_vm_status(self, vm_id: str) -> Dict[str, Any]:
+        return self.libvirt_manager.get_vm_status(vm_id)
+
+    def list_vms(self) -> List[VM]:
+        return list(self.libvirt_manager.vms.values())
+
+    def delete_vm(self, vm_id: str) -> None:
+        return self.libvirt_manager.delete_vm(vm_id)
+
+    def start_vm(self, vm_id: str) -> None:
+        return self.libvirt_manager.start_vm(vm_id)
+
+    def stop_vm(self, vm_id: str) -> None:
+        return self.libvirt_manager.stop_vm(vm_id)
+
+    def restart_vm(self, vm_id: str) -> None:
+        return self.libvirt_manager.restart_vm(vm_id)
