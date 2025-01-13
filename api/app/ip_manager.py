@@ -11,121 +11,68 @@ logger = logging.getLogger(__name__)
 
 class IPManager:
     def __init__(self):
-        pass
+        self.ip_range = ipaddress.IPv4Network('10.0.0.0/24')
+        self._ensure_ip_pool()
 
-    def _configure_interface(self, ip: str, interface: str) -> None:
-        try:
-            network = ipaddress.ip_network(f"{ip}/24", strict=False)
-            gateway = str(next(network.hosts()))
-            
-            # Configure interface with IP
-            subprocess.run(['sudo', 'ip', 'addr', 'add', f"{ip}/24", 'dev', interface], check=True)
-            subprocess.run(['sudo', 'ip', 'link', 'set', interface, 'up'], check=True)
-            
-            # Enable IP forwarding
-            subprocess.run(['sudo', 'sysctl', '-w', 'net.ipv4.ip_forward=1'], check=True)
-            
-            # Set up NAT
-            subprocess.run(['sudo', 'iptables', '-t', 'nat', '-A', 'POSTROUTING', '-s', f"{ip}/24", '-j', 'MASQUERADE'], check=True)
-            subprocess.run(['sudo', 'iptables', '-A', 'FORWARD', '-i', interface, '-j', 'ACCEPT'], check=True)
-            subprocess.run(['sudo', 'iptables', '-A', 'FORWARD', '-o', interface, '-j', 'ACCEPT'], check=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to configure interface: {e}")
-            raise
+    def _ensure_ip_pool(self):
+        """Ensure IP pool exists and is populated"""
+        ips = db.list_ips()
+        if not ips:
+            # Initialize IP pool
+            for ip in list(self.ip_range.hosts())[1:]:  # Skip network address
+                self.add_ip(str(ip))
 
-    def _deconfigure_interface(self, ip: str, interface: str) -> None:
-        try:
-            # Remove NAT rules
-            subprocess.run(['sudo', 'iptables', '-t', 'nat', '-D', 'POSTROUTING', '-s', f"{ip}/24", '-j', 'MASQUERADE'], check=True)
-            subprocess.run(['sudo', 'iptables', '-D', 'FORWARD', '-i', interface, '-j', 'ACCEPT'], check=True)
-            subprocess.run(['sudo', 'iptables', '-D', 'FORWARD', '-o', interface, '-j', 'ACCEPT'], check=True)
-            
-            # Remove IP from interface
-            subprocess.run(['sudo', 'ip', 'addr', 'del', f"{ip}/24", 'dev', interface], check=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to deconfigure interface: {e}")
-            raise
-
-    def create_bridge(self, bridge_name: str, ip: str) -> None:
-        """Create a bridge interface and assign an IP address."""
-        try:
-            # Create and configure bridge interface
-            subprocess.run(['sudo', 'ip', 'link', 'add', 'name', bridge_name, 'type', 'bridge'], check=True)
-            subprocess.run(['sudo', 'ip', 'addr', 'add', f"{ip}/24", 'dev', bridge_name], check=True)
-            subprocess.run(['sudo', 'ip', 'link', 'set', bridge_name, 'up'], check=True)
-            
-            # Enable IP forwarding
-            subprocess.run(['sudo', 'sysctl', '-w', 'net.ipv4.ip_forward=1'], check=True)
-            
-            # Set up NAT and forwarding rules
-            subprocess.run(['sudo', 'iptables', '-t', 'nat', '-A', 'POSTROUTING', '-s', f"{ip}/24", '-j', 'MASQUERADE'], check=True)
-            subprocess.run(['sudo', 'iptables', '-A', 'FORWARD', '-i', bridge_name, '-j', 'ACCEPT'], check=True)
-            subprocess.run(['sudo', 'iptables', '-A', 'FORWARD', '-o', bridge_name, '-j', 'ACCEPT'], check=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to create bridge: {e}")
-            raise
-
-    def delete_bridge(self, bridge_name: str, ip: str) -> None:
-        """Delete the bridge interface and clean up NAT rules."""
-        try:
-            # Remove NAT and forwarding rules
-            subprocess.run(['sudo', 'iptables', '-t', 'nat', '-D', 'POSTROUTING', '-s', f"{ip}/24", '-j', 'MASQUERADE'], check=True)
-            subprocess.run(['sudo', 'iptables', '-D', 'FORWARD', '-i', bridge_name, '-j', 'ACCEPT'], check=True)
-            subprocess.run(['sudo', 'iptables', '-D', 'FORWARD', '-o', bridge_name, '-j', 'ACCEPT'], check=True)
-            
-            # Delete bridge interface
-            subprocess.run(['sudo', 'ip', 'link', 'set', bridge_name, 'down'], check=True)
-            subprocess.run(['sudo', 'ip', 'link', 'delete', bridge_name, 'type', 'bridge'], check=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to delete bridge: {e}")
-            raise
-
-    # Database operations remain unchanged
     def add_ip(self, ip: str) -> None:
-        db.save_ip({
-            'ip': ip,
-            'state': 'available'
+        """Add an IP to the pool"""
+        db.create_ip(ip, {
+            'state': 'available',
+            'machine_id': None,
+            'is_elastic': False
         })
 
     def remove_ip(self, ip: str) -> None:
+        """Remove an IP from the pool"""
         db.delete_ip(ip)
 
     def list_ips(self) -> List[dict]:
+        """List all IPs"""
         return db.list_ips()
 
     def get_available_ip(self) -> Optional[str]:
+        """Get an available IP"""
         ips = db.list_ips()
-        available_ips = [ip['ip'] for ip in ips if ip['state'] == 'available']
-        return random.choice(available_ips) if available_ips else None
+        available = [ip for ip in ips if ip.get('state') == 'available']
+        return random.choice(available)['ip'] if available else None
 
     def attach_ip(self, ip: str, machine_id: str, is_elastic: bool = False) -> None:
+        """Attach an IP to a machine"""
         ip_data = db.get_ip(ip)
         if not ip_data:
             raise ValueError(f"IP {ip} not found")
-        if ip_data['state'] != 'available':
+        if ip_data.get('state') != 'available':
             raise ValueError(f"IP {ip} is not available")
 
-        db.save_ip({
-            'ip': ip,
+        db.update_ip(ip, {
+            'state': 'attached',
             'machine_id': machine_id,
-            'is_elastic': is_elastic,
-            'state': 'attached'
+            'is_elastic': is_elastic
         })
 
     def detach_ip(self, ip: str) -> None:
+        """Detach an IP from a machine"""
         ip_data = db.get_ip(ip)
         if not ip_data:
             raise ValueError(f"IP {ip} not found")
-        if ip_data['state'] != 'attached':
+        if ip_data.get('state') != 'attached':
             raise ValueError(f"IP {ip} is not attached to any machine")
 
-        db.save_ip({
-            'ip': ip,
+        db.update_ip(ip, {
+            'state': 'available',
             'machine_id': None,
-            'is_elastic': False,
-            'state': 'available'
+            'is_elastic': False
         })
 
     def get_machine_ips(self, machine_id: str) -> List[dict]:
+        """Get all IPs attached to a machine"""
         ips = db.list_ips()
         return [ip for ip in ips if ip.get('machine_id') == machine_id] 

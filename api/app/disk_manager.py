@@ -29,28 +29,31 @@ class DiskManager:
         
         # Create the disk file
         pool = self.conn.storagePoolLookupByName('default')
-        vol_xml = f"""
-        <volume type='file'>
+        vol_xml = f"""<volume type='file'>
             <name>{disk_id}.qcow2</name>
             <capacity unit='G'>{size_gb}</capacity>
             <target>
                 <format type='qcow2'/>
             </target>
-        </volume>
-        """
-        volume = pool.createXML(vol_xml, 0)
-        if not volume:
-            raise Exception("Failed to create disk volume")
+        </volume>"""
         
-        # Save to database
-        db.save_disk({
-            'id': disk_id,
-            'name': name,
-            'size_gb': size_gb,
-            'state': 'available'
-        })
-        
-        return disk
+        try:
+            volume = pool.createXML(vol_xml, 0)
+            if not volume:
+                raise Exception("Failed to create disk volume")
+            
+            # Save to database
+            db.create_disk(disk_id, {
+                'name': name,
+                'size_gb': size_gb,
+                'state': 'available'
+            })
+            
+            return disk
+            
+        except libvirt.libvirtError as e:
+            logger.error(f"Failed to create disk volume: {e}")
+            raise Exception(f"Failed to create disk volume: {e}")
 
     def delete_disk(self, disk_id: str) -> None:
         disk_data = db.get_disk(disk_id)
@@ -70,16 +73,23 @@ class DiskManager:
         
         db.delete_disk(disk_id)
 
-    def attach_disk(self, disk_id: str, vm_name: str) -> None:
+    def attach_disk(self, disk_id: str, vm_id: str) -> None:
         disk_data = db.get_disk(disk_id)
         if not disk_data:
             raise ValueError(f"Disk {disk_id} not found")
         
-        if disk_data['attached_to']:
+        if disk_data.get('attached_to'):
             raise ValueError(f"Disk {disk_id} is already attached to a machine")
         
         try:
-            domain = self.conn.lookupByName(vm_name)
+            # Get VM domain using the VM ID
+            domain = None
+            try:
+                domain = self.conn.lookupByName(vm_id)
+            except libvirt.libvirtError:
+                logger.error(f"Could not find VM domain for {vm_id}")
+                raise ValueError(f"VM {vm_id} not found")
+
             pool = self.conn.storagePoolLookupByName('default')
             volume = pool.storageVolLookupByName(f"{disk_id}.qcow2")
             
@@ -110,14 +120,17 @@ class DiskManager:
             domain.attachDevice(disk_xml)
             
             # Update database
-            db.save_disk({
-                'id': disk_id,
-                'attached_to': vm_name,
+            db.update_disk(disk_id, {
+                'attached_to': vm_id,
                 'state': 'attached'
             })
             
         except libvirt.libvirtError as e:
+            logger.error(f"Failed to attach disk: {e}")
             raise Exception(f"Failed to attach disk: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error attaching disk: {e}")
+            raise
 
     def detach_disk(self, disk_id: str) -> None:
         disk_data = db.get_disk(disk_id)
@@ -144,8 +157,7 @@ class DiskManager:
                     break
             
             # Update database
-            db.save_disk({
-                'id': disk_id,
+            db.update_disk(disk_id, {
                 'attached_to': None,
                 'state': 'available'
             })
@@ -181,8 +193,7 @@ class DiskManager:
             volume.resize(new_size_gb * 1024 * 1024 * 1024)
             
             # Update database
-            db.save_disk({
-                'id': disk_id,
+            db.update_disk(disk_id, {
                 'size_gb': new_size_gb
             })
             

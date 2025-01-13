@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -12,6 +12,7 @@ class Database:
         self.db_dir.mkdir(parents=True, exist_ok=True)
         self.vms_file = self.db_dir / "vms.json"
         self.disks_file = self.db_dir / "disks.json"
+        self.ips_file = self.db_dir / "ips.json"
         self._ensure_files_exist()
 
     def _ensure_files_exist(self):
@@ -20,6 +21,8 @@ class Database:
             self.vms_file.write_text("{}")
         if not self.disks_file.exists():
             self.disks_file.write_text("{}")
+        if not self.ips_file.exists():
+            self.ips_file.write_text('{"ips": {}}')
 
     def _load_vms(self) -> Dict[str, Any]:
         """Load VMs from the database file"""
@@ -126,6 +129,59 @@ class Database:
             raise Exception(f"Disk with ID {disk_id} not found")
         del disks[disk_id]
         self._save_disks(disks)
+
+    def _load_ips(self) -> Dict[str, Any]:
+        """Load IPs from the database file"""
+        try:
+            return json.loads(self.ips_file.read_text())
+        except Exception as e:
+            logger.error(f"Error loading IPs: {str(e)}")
+            return {"ips": {}}
+
+    def _save_ips(self, data: Dict[str, Any]):
+        """Save IPs to the database file"""
+        try:
+            self.ips_file.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            logger.error(f"Error saving IPs: {str(e)}")
+            raise
+
+    def list_ips(self) -> List[Dict[str, Any]]:
+        """List all IPs"""
+        data = self._load_ips()
+        return [{"ip": ip, **ip_data} for ip, ip_data in data.get("ips", {}).items()]
+
+    def get_ip(self, ip: str) -> Optional[Dict[str, Any]]:
+        """Get IP data"""
+        data = self._load_ips()
+        ip_data = data.get("ips", {}).get(ip)
+        if ip_data:
+            return {"ip": ip, **ip_data}
+        return None
+
+    def create_ip(self, ip: str, data: Dict[str, Any]):
+        """Create a new IP entry"""
+        all_data = self._load_ips()
+        if ip in all_data.get("ips", {}):
+            raise Exception(f"IP {ip} already exists")
+        all_data.setdefault("ips", {})[ip] = data
+        self._save_ips(all_data)
+
+    def update_ip(self, ip: str, data: Dict[str, Any]):
+        """Update an existing IP entry"""
+        all_data = self._load_ips()
+        if ip not in all_data.get("ips", {}):
+            raise Exception(f"IP {ip} not found")
+        all_data["ips"][ip].update(data)
+        self._save_ips(all_data)
+
+    def delete_ip(self, ip: str):
+        """Delete an IP entry"""
+        all_data = self._load_ips()
+        if ip not in all_data.get("ips", {}):
+            raise Exception(f"IP {ip} not found")
+        del all_data["ips"][ip]
+        self._save_ips(all_data)
 
 # Create a global database instance
 db = Database() 

@@ -1,0 +1,7 @@
+{
+  "name": "xz",
+  "cidr": "10.0.0.0/16",
+  "subnets": {},
+  "used_private_ips": {},
+  "used_public_ips": {}
+}

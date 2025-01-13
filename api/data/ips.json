@@ -1,0 +1,1269 @@
+{
+  "ips": {
+    "10.0.0.2": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.3": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.4": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.5": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.6": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.7": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.8": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.9": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.10": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.11": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.12": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.13": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.14": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.15": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.16": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.17": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.18": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.19": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.20": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.21": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.22": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.23": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.24": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.25": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.26": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.27": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.28": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.29": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.30": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.31": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.32": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.33": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.34": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.35": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.36": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.37": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.38": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.39": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.40": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.41": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.42": {
+      "state": "attached",
+      "machine_id": "ramc1d94",
+      "is_elastic": false
+    },
+    "10.0.0.43": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.44": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.45": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.46": {
+      "state": "attached",
+      "machine_id": "ymwse796",
+      "is_elastic": false
+    },
+    "10.0.0.47": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.48": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.49": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.50": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.51": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.52": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.53": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.54": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.55": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.56": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.57": {
+      "state": "attached",
+      "machine_id": "rfkrfea5",
+      "is_elastic": false
+    },
+    "10.0.0.58": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.59": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.60": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.61": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.62": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.63": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.64": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.65": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.66": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.67": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.68": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.69": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.70": {
+      "state": "attached",
+      "machine_id": "cgio137b",
+      "is_elastic": false
+    },
+    "10.0.0.71": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.72": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.73": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.74": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.75": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.76": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.77": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.78": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.79": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.80": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.81": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.82": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.83": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.84": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.85": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.86": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.87": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.88": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.89": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.90": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.91": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.92": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.93": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.94": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.95": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.96": {
+      "state": "attached",
+      "machine_id": "c493b646",
+      "is_elastic": false
+    },
+    "10.0.0.97": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.98": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.99": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.100": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.101": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.102": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.103": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.104": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.105": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.106": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.107": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.108": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.109": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.110": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.111": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.112": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.113": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.114": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.115": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.116": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.117": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.118": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.119": {
+      "state": "attached",
+      "machine_id": "zymz8ccc",
+      "is_elastic": false
+    },
+    "10.0.0.120": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.121": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.122": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.123": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.124": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.125": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.126": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.127": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.128": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.129": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.130": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.131": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.132": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.133": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.134": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.135": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.136": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.137": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.138": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.139": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.140": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.141": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.142": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.143": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.144": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.145": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.146": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.147": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.148": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.149": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.150": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.151": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.152": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.153": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.154": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.155": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.156": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.157": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.158": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.159": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.160": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.161": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.162": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.163": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.164": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.165": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.166": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.167": {
+      "state": "attached",
+      "machine_id": "wetd8fd9",
+      "is_elastic": false
+    },
+    "10.0.0.168": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.169": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.170": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.171": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.172": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.173": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.174": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.175": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.176": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.177": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.178": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.179": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.180": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.181": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.182": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.183": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.184": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.185": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.186": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.187": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.188": {
+      "state": "attached",
+      "machine_id": "wqmr484c",
+      "is_elastic": false
+    },
+    "10.0.0.189": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.190": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.191": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.192": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.193": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.194": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.195": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.196": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.197": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.198": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.199": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.200": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.201": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.202": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.203": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.204": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.205": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.206": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.207": {
+      "state": "attached",
+      "machine_id": "3a13bc3f",
+      "is_elastic": false
+    },
+    "10.0.0.208": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.209": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.210": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.211": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.212": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.213": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.214": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.215": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.216": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.217": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.218": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.219": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.220": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.221": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.222": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.223": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.224": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.225": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.226": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.227": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.228": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.229": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.230": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.231": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.232": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.233": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.234": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.235": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.236": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.237": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.238": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.239": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.240": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.241": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.242": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.243": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.244": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.245": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.246": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.247": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.248": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.249": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.250": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.251": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.252": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.253": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    },
+    "10.0.0.254": {
+      "state": "available",
+      "machine_id": null,
+      "is_elastic": false
+    }
+  }
+}

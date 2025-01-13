@@ -1,1 +1,121 @@
-{}
+{
+  "mrzb387b": {
+    "name": "v",
+    "cpu_cores": 2,
+    "memory_mb": 2048,
+    "disk_size_gb": 20,
+    "network_name": "VPC1",
+    "cloud_init": null,
+    "image_id": "ubuntu-20.04",
+    "network_info": {
+      "private": {
+        "ip": "192.168.1.236",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "192.168.1.1",
+        "network_name": "VPC1-private"
+      }
+    },
+    "ssh_port": 2222,
+    "status": "creating"
+  },
+  "ramc1d94": {
+    "name": "xx",
+    "cpu_cores": 2,
+    "memory_mb": 2048,
+    "disk_size_gb": 20,
+    "network_name": "VPC1",
+    "cloud_init": null,
+    "image_id": "ubuntu-20.04",
+    "network_info": {
+      "private": {
+        "ip": "192.168.1.207",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "192.168.1.1",
+        "network_name": "VPC1-private"
+      },
+      "public": {
+        "ip": "10.0.0.42",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "10.1.207.1",
+        "network_name": "VPC1-public"
+      }
+    },
+    "ssh_port": 2222,
+    "status": "creating"
+  },
+  "cgio137b": {
+    "name": "vvv",
+    "cpu_cores": 2,
+    "memory_mb": 2048,
+    "disk_size_gb": 20,
+    "network_name": "VPC1",
+    "cloud_init": null,
+    "image_id": "ubuntu-20.04",
+    "network_info": {
+      "private": {
+        "ip": "192.168.1.162",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "192.168.1.1",
+        "network_name": "VPC1-private"
+      },
+      "public": {
+        "ip": "10.0.0.70",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "10.1.162.1",
+        "network_name": "VPC1-public"
+      }
+    },
+    "ssh_port": 2222,
+    "status": "creating"
+  },
+  "zymz8ccc": {
+    "name": "vvc",
+    "cpu_cores": 2,
+    "memory_mb": 2048,
+    "disk_size_gb": 20,
+    "network_name": "VPC1",
+    "cloud_init": null,
+    "image_id": "ubuntu-20.04",
+    "network_info": {
+      "private": {
+        "ip": "192.168.1.231",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "192.168.1.1",
+        "network_name": "VPC1-private"
+      },
+      "public": {
+        "ip": "10.0.0.119",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "10.1.231.1",
+        "network_name": "VPC1-public"
+      }
+    },
+    "ssh_port": 2222,
+    "status": "creating"
+  },
+  "wetd8fd9": {
+    "name": "vvhjb",
+    "cpu_cores": 2,
+    "memory_mb": 2048,
+    "disk_size_gb": 20,
+    "network_name": "VPC1",
+    "cloud_init": null,
+    "image_id": "ubuntu-20.04",
+    "network_info": {
+      "private": {
+        "ip": "192.168.1.250",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "192.168.1.1",
+        "network_name": "VPC1-private"
+      },
+      "public": {
+        "ip": "10.0.0.167",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "10.1.250.1",
+        "network_name": "VPC1-public"
+      }
+    },
+    "ssh_port": 2222,
+    "status": "creating"
+  }
+}

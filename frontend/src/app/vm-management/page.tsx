@@ -6,9 +6,6 @@ import {
   createVM,
   listVPCs,
   attachDisk,
-  detachDisk,
-  attachIP,
-  detachIP,
   resizeVM,
   getVMConsole,
   getVMMetrics,
@@ -60,7 +57,7 @@ export default function VMManagementPage() {
   const [selectedDisk, setSelectedDisk] = useState<string | null>(null);
   const [newVM, setNewVM] = useState({
     name: "",
-    vpc: "",
+    network_name: "",
     cpu_cores: 2,
     memory_mb: 2048,
     disk_size_gb: 20,
@@ -74,39 +71,27 @@ export default function VMManagementPage() {
   const queryClient = useQueryClient();
 
   // Fetch VPCs for VM creation
-  const { data: vpcsData, isLoading: isLoadingVPCs, error: vpcsError } = useQuery({
+  const { data: vpcsData } = useQuery({
     queryKey: ["vpcs"],
-    queryFn: async () => {
-      const response = await listVPCs();
-      return response.data;
-    },
+    queryFn: listVPCs,
   });
 
   // Fetch available disks
-  const { data: disksData, isLoading: isLoadingDisks, error: disksError } = useQuery({
+  const { data: disksData } = useQuery({
     queryKey: ["disks"],
-    queryFn: async () => {
-      const response = await listDisks();
-      return response.data;
-    },
+    queryFn: listDisks,
   });
 
   // Fetch VMs
   const { data: vmsData, isLoading: isLoadingVMs, error: vmsError } = useQuery({
     queryKey: ["vms"],
-    queryFn: async () => {
-      const response = await listVMs();
-      return response.data;
-    },
+    queryFn: listVMs,
   });
 
   // Fetch available images
-  const { data: imagesData, isLoading: isLoadingImages, error: imagesError } = useQuery({
+  const { data: imagesData } = useQuery({
     queryKey: ["images"],
-    queryFn: async () => {
-      const response = await listImages();
-      return response.data;
-    },
+    queryFn: listImages,
   });
 
   // Create VM mutation
@@ -117,7 +102,7 @@ export default function VMManagementPage() {
       setIsCreateOpen(false);
       setNewVM({
         name: "",
-        vpc: "",
+        network_name: "",
         cpu_cores: 2,
         memory_mb: 2048,
         disk_size_gb: 20,
@@ -148,43 +133,20 @@ export default function VMManagementPage() {
     },
   });
 
-  // Detach disk mutation
-  const detachDiskMutation = useMutation({
-    mutationFn: ({ vmId, diskId }: { vmId: string; diskId: string }) =>
-      detachDisk(vmId, diskId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["vms"] });
-    },
-  });
-
-  // Attach IP mutation
-  const attachIPMutation = useMutation({
-    mutationFn: ({ vmId, ip }: { vmId: string; ip: string }) =>
-      attachIP(vmId, ip),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["vms"] });
-    },
-  });
-
-  // Detach IP mutation
-  const detachIPMutation = useMutation({
-    mutationFn: ({ vmId, ip }: { vmId: string; ip: string }) =>
-      detachIP(vmId, ip),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["vms"] });
-    },
-  });
-
   const handleCreateVM = () => {
-    if (!newVM.name || !newVM.vpc || !newVM.image_id) return;
-    createVMMutation.mutate({
-      name: newVM.name,
-      vpc: newVM.vpc,
-      cpu_cores: newVM.cpu_cores,
-      memory_mb: newVM.memory_mb,
-      disk_size_gb: newVM.disk_size_gb,
-      image_id: newVM.image_id
-    });
+    createVMMutation.mutate(newVM);
+  };
+
+  const isCreateButtonDisabled = () => {
+    return (
+      !newVM.name ||
+      !newVM.network_name ||
+      !newVM.image_id ||
+      newVM.cpu_cores < 1 ||
+      newVM.memory_mb < 512 ||
+      newVM.disk_size_gb < 10 ||
+      createVMMutation.isPending
+    );
   };
 
   const handleResizeVM = () => {
@@ -203,7 +165,7 @@ export default function VMManagementPage() {
     });
   };
 
-  if (isLoadingVMs || isLoadingVPCs || isLoadingDisks || isLoadingImages) {
+  if (isLoadingVMs) {
     return (
       <div className="flex items-center justify-center h-screen">
         <LoadingSpinner className="h-8 w-8" />
@@ -211,10 +173,10 @@ export default function VMManagementPage() {
     );
   }
 
-  if (vmsError || vpcsError || disksError || imagesError) {
+  if (vmsError) {
     return (
       <div className="p-4">
-        <ErrorMessage message="Failed to load data. Please try again later." />
+        <ErrorMessage message="Failed to load VMs. Please try again later." />
       </div>
     );
   }
@@ -243,21 +205,23 @@ export default function VMManagementPage() {
                     setNewVM({ ...newVM, name: e.target.value })
                   }
                   placeholder="e.g., web-server-1"
+                  required
                 />
               </div>
               <div className="space-y-2">
                 <Label>VPC</Label>
                 <Select
-                  value={newVM.vpc}
+                  value={newVM.network_name}
                   onValueChange={(value) =>
-                    setNewVM({ ...newVM, vpc: value })
+                    setNewVM({ ...newVM, network_name: value })
                   }
+                  required
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Select a VPC" />
                   </SelectTrigger>
                   <SelectContent>
-                    {vpcsData?.vpcs?.map((vpc: any) => (
+                    {vpcsData?.vpcs?.map((vpc) => (
                       <SelectItem key={vpc.name} value={vpc.name}>
                         {vpc.name}
                       </SelectItem>
@@ -272,12 +236,13 @@ export default function VMManagementPage() {
                   onValueChange={(value) =>
                     setNewVM({ ...newVM, image_id: value })
                   }
+                  required
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Select an image" />
                   </SelectTrigger>
                   <SelectContent>
-                    {imagesData?.images?.map((image: any) => (
+                    {imagesData?.images?.map((image) => (
                       <SelectItem key={image.id} value={image.id}>
                         {image.name}
                       </SelectItem>
@@ -294,11 +259,12 @@ export default function VMManagementPage() {
                     onChange={(e) =>
                       setNewVM({
                         ...newVM,
-                        cpu_cores: parseInt(e.target.value),
+                        cpu_cores: parseInt(e.target.value) || 1,
                       })
                     }
                     min={1}
                     max={16}
+                    required
                   />
                 </div>
                 <div className="space-y-2">
@@ -309,12 +275,13 @@ export default function VMManagementPage() {
                     onChange={(e) =>
                       setNewVM({
                         ...newVM,
-                        memory_mb: parseInt(e.target.value),
+                        memory_mb: parseInt(e.target.value) || 512,
                       })
                     }
                     min={512}
                     max={32768}
                     step={512}
+                    required
                   />
                 </div>
                 <div className="space-y-2">
@@ -325,17 +292,18 @@ export default function VMManagementPage() {
                     onChange={(e) =>
                       setNewVM({
                         ...newVM,
-                        disk_size_gb: parseInt(e.target.value),
+                        disk_size_gb: parseInt(e.target.value) || 10,
                       })
                     }
                     min={10}
                     max={1000}
+                    required
                   />
                 </div>
               </div>
               <Button
                 onClick={handleCreateVM}
-                disabled={createVMMutation.isPending}
+                disabled={isCreateButtonDisabled()}
                 className="w-full"
               >
                 {createVMMutation.isPending ? (
@@ -359,18 +327,25 @@ export default function VMManagementPage() {
       </div>
 
       <div className="grid gap-4">
-        {vmsData?.vms?.map((vm: any) => (
+        {vmsData?.vms?.map((vm) => (
           <Card key={vm.id}>
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
                 <span>{vm.name}</span>
                 <span className="text-sm font-normal">
-                  Status: {vm.status}
+                  Status: {vm.status || "unknown"}
                 </span>
               </CardTitle>
               <CardDescription>
-                {vm.cpu_cores} CPU cores, {vm.memory_mb}MB RAM,{" "}
-                {vm.disk_size_gb}GB Disk
+                {vm.config.cpu_cores} CPU cores, {vm.config.memory_mb}MB RAM,{" "}
+                {vm.config.disk_size_gb}GB Disk
+                {vm.network_info?.private && (
+                  <div>Private IP: {vm.network_info.private.ip}</div>
+                )}
+                {vm.network_info?.public && (
+                  <div>Public IP: {vm.network_info.public.ip}</div>
+                )}
+                {vm.ssh_port && <div>SSH Port: {vm.ssh_port}</div>}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -396,16 +371,6 @@ export default function VMManagementPage() {
                 >
                   <HardDrive className="mr-2 h-4 w-4" />
                   Attach Disk
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    // TODO: Implement IP management
-                  }}
-                >
-                  <Network className="mr-2 h-4 w-4" />
-                  Manage IPs
                 </Button>
               </div>
             </CardContent>
@@ -490,7 +455,7 @@ export default function VMManagementPage() {
                   <SelectValue placeholder="Select a disk" />
                 </SelectTrigger>
                 <SelectContent>
-                  {disksData?.disks?.map((disk: any) => (
+                  {disksData?.disks?.map((disk) => (
                     <SelectItem key={disk.id} value={disk.id}>
                       {disk.name} ({disk.size_gb}GB)
                     </SelectItem>

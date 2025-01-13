@@ -1,8 +1,5 @@
 flask==3.0.0
 flask-cors==4.0.0
-flask-socketio==5.3.6
-python-socketio==5.10.0
-eventlet==0.33.3
 requests==2.31.0
 beautifulsoup4==4.12.2
 libvirt-python==9.0.0
