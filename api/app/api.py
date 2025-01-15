@@ -270,14 +270,17 @@ def start_migration():
         config = MigrationConfig(
             vm_name=data['vm_name'],
             destination_uri=data['destination_uri'],
+            migration_type=MigrationType(data.get('migration_type', 'direct')),
             bandwidth=data.get('bandwidth'),
             max_downtime=data.get('max_downtime'),
-            compressed=data.get('compressed', True),
-            auto_converge=data.get('auto_converge', True)
+            compressed=data.get('compressed', True)
         )
         
         migration_manager.start_migration(config)
-        return jsonify({'success': True, 'message': f"Started migration of VM {config.vm_name}"})
+        return jsonify({
+            'success': True, 
+            'message': f"Started {config.migration_type.value} migration of VM {config.vm_name}"
+        })
     except MigrationError as e:
         logger.error(f"Migration error: {str(e)}")
         return jsonify({'error': str(e)}), 400
@@ -300,7 +303,6 @@ def get_migration_status(vm_name):
             'data_total': status.data_total,
             'data_processed': status.data_processed,
             'data_remaining': status.data_remaining,
-            'downtime': status.downtime,
             'speed': status.speed
         })
     except MigrationError as e:
