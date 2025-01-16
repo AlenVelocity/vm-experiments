@@ -24,6 +24,7 @@ import traceback
 from .db import db
 import random
 import string
+import platform
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,12 +32,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VMConfig:
     name: str
-    cpu_cores: int = 2
-    memory_mb: int = 2048
-    disk_size_gb: int = 20
-    network_name: Optional[str] = None
-    cloud_init: Optional[Dict[str, Any]] = None
-    image_id: Optional[str] = None
+    network_name: str
+    cpu_cores: int
+    memory_mb: int
+    disk_size_gb: int
+    image_id: str
+    cloud_init: Optional[dict] = None
+    arch: Optional[str] = None
 
 @dataclass
 class VM:
@@ -207,6 +209,18 @@ ethernets:
     def create_vm(self, config: VMConfig) -> VM:
         """Create a new VM."""
         try:
+            # Validate architecture compatibility
+            if config.arch:
+                current_arch = platform.machine().lower()
+                if 'arm' in current_arch or 'aarch64' in current_arch:
+                    if config.arch.lower() not in ['arm64', 'aarch64']:
+                        raise VMError(f"Architecture {config.arch} not supported on this ARM platform")
+                elif config.arch.lower() not in ['x86_64', 'amd64']:
+                    raise VMError(f"Architecture {config.arch} not supported on this x86 platform")
+            
+            # Prepare cloud-init config if provided
+            cloud_init_iso = self._prepare_cloud_init_config(config)
+            
             # Generate a unique ID for the VM with hex digits at the end
             vm_id = str(uuid.uuid4())[:8]  # Use first 8 chars of a real UUID for the ID
             vm_uuid = str(uuid.uuid4())    # Generate a full UUID for libvirt
@@ -300,6 +314,10 @@ ethernets:
 
             # Add to in-memory cache
             self.vms[vm_id] = vm
+
+            # Attach cloud-init ISO if created
+            if cloud_init_iso:
+                self._attach_cloud_init_iso(vm.name, cloud_init_iso)
 
             return vm
 
@@ -829,94 +847,178 @@ ethernets:
             logger.error(f"Error saving VM configuration: {str(e)}")
             raise
 
+    def _prepare_cloud_init_config(self, config: VMConfig) -> Optional[str]:
+        """Prepare cloud-init configuration if provided."""
+        if not config.cloud_init:
+            return None
+            
+        try:
+            # Generate cloud-init ISO file
+            import yaml
+            from tempfile import NamedTemporaryFile
+            import subprocess
+            
+            # Create user-data file
+            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump({'#cloud-config': config.cloud_init}, f)
+                user_data_file = f.name
+                
+            # Create meta-data file (empty is fine for basic cloud-init)
+            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump({}, f)
+                meta_data_file = f.name
+                
+            # Generate ISO file
+            iso_file = f"/var/lib/libvirt/images/cloud-init-{config.name}.iso"
+            subprocess.run([
+                'genisoimage', '-output', iso_file,
+                '-volid', 'cidata',
+                '-joliet', '-rock',
+                user_data_file, meta_data_file
+            ], check=True)
+            
+            return iso_file
+            
+        except Exception as e:
+            logger.error(f"Failed to prepare cloud-init config: {e}")
+            raise VMError(f"Failed to prepare cloud-init config: {e}")
+            
+    def _attach_cloud_init_iso(self, vm_name: str, iso_path: str):
+        """Attach cloud-init ISO to the VM."""
+        try:
+            domain = self.conn.lookupByName(vm_name)
+            
+            # Generate disk XML
+            disk_xml = f"""
+            <disk type='file' device='cdrom'>
+                <driver name='qemu' type='raw'/>
+                <source file='{iso_path}'/>
+                <target dev='hdc' bus='ide'/>
+                <readonly/>
+            </disk>
+            """
+            
+            domain.attachDevice(disk_xml)
+            
+        except Exception as e:
+            logger.error(f"Failed to attach cloud-init ISO: {e}")
+            raise VMError(f"Failed to attach cloud-init ISO: {e}")
+            
+    def _cleanup_failed_vm(self, vm_name: str):
+        """Cleanup resources after failed VM creation."""
+        try:
+            # Remove cloud-init ISO if it exists
+            iso_path = f"/var/lib/libvirt/images/cloud-init-{vm_name}.iso"
+            if os.path.exists(iso_path):
+                os.remove(iso_path)
+                
+            # Existing cleanup logic...
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
 class VMManager:
-    def __init__(self):
-        self.libvirt_manager = LibvirtManager()
-        self.active_consoles = {}
-
+    def __init__(self, network_manager: NetworkManager):
+        self.network_manager = network_manager
+        self.conn = get_libvirt_connection()
+        
+    def _prepare_cloud_init_config(self, config: VMConfig) -> Optional[str]:
+        """Prepare cloud-init configuration if provided."""
+        if not config.cloud_init:
+            return None
+            
+        try:
+            # Generate cloud-init ISO file
+            import yaml
+            from tempfile import NamedTemporaryFile
+            import subprocess
+            
+            # Create user-data file
+            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump({'#cloud-config': config.cloud_init}, f)
+                user_data_file = f.name
+                
+            # Create meta-data file (empty is fine for basic cloud-init)
+            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump({}, f)
+                meta_data_file = f.name
+                
+            # Generate ISO file
+            iso_file = f"/var/lib/libvirt/images/cloud-init-{config.name}.iso"
+            subprocess.run([
+                'genisoimage', '-output', iso_file,
+                '-volid', 'cidata',
+                '-joliet', '-rock',
+                user_data_file, meta_data_file
+            ], check=True)
+            
+            return iso_file
+            
+        except Exception as e:
+            logger.error(f"Failed to prepare cloud-init config: {e}")
+            raise VMError(f"Failed to prepare cloud-init config: {e}")
+            
     def create_vm(self, config: VMConfig) -> VM:
-        return self.libvirt_manager.create_vm(config)
-
-    def get_vm_status(self, vm_id: str) -> Dict[str, Any]:
-        return self.libvirt_manager.get_vm_status(vm_id)
-
-    def list_vms(self) -> List[VM]:
-        return self.libvirt_manager.list_vms()
-
-    def get_vm(self, vm_id: str) -> Optional[VM]:
-        return self.libvirt_manager.get_vm(vm_id)
-
-    def delete_vm(self, vm_id: str) -> None:
-        return self.libvirt_manager.delete_vm(vm_id)
-
-    def start_vm(self, vm_id: str) -> None:
-        return self.libvirt_manager.start_vm(vm_id)
-
-    def stop_vm(self, vm_id: str) -> None:
-        return self.libvirt_manager.stop_vm(vm_id)
-
-    def restart_vm(self, vm_id: str) -> None:
-        return self.libvirt_manager.restart_vm(vm_id)
-
-    def resize_cpu(self, vm: VM, cpu_cores: int) -> None:
-        return self.libvirt_manager.resize_cpu(vm, cpu_cores)
-
-    def resize_memory(self, vm: VM, memory_mb: int) -> None:
-        return self.libvirt_manager.resize_memory(vm, memory_mb)
-
-    def get_metrics(self, vm: VM) -> Dict[str, Any]:
-        return self.libvirt_manager.get_metrics(vm)
-
-    def create_disk(self, name: str, size_gb: int) -> Dict[str, Any]:
-        return self.libvirt_manager.create_disk(name, size_gb)
-
-    def attach_disk(self, disk_id: str, vm_name: str) -> None:
-        return self.libvirt_manager.attach_disk(disk_id, vm_name)
-
-    def detach_disk(self, disk_id: str) -> None:
-        return self.libvirt_manager.detach_disk(disk_id)
-
-    def get_console(self, vm: VM) -> 'VMConsole':
-        if vm.id not in self.active_consoles:
-            self.active_consoles[vm.id] = VMConsole(vm, self.libvirt_manager)
-        return self.active_consoles[vm.id]
-
-    def send_console_input(self, text: str) -> None:
-        for console in self.active_consoles.values():
-            if console.is_active:
-                console.send_input(text)
-
-    def list_disks(self) -> List[Dict]:
-        """List all disks"""
-        return self.libvirt_manager.list_disks()
-
-    def create_disk(self, name: str, size_gb: int) -> Dict:
-        """Create a new disk"""
-        return self.libvirt_manager.create_disk(name, size_gb)
-
-    def delete_disk(self, disk_id: str) -> None:
-        """Delete a disk"""
-        return self.libvirt_manager.delete_disk(disk_id)
-
-    def attach_disk(self, disk_id: str, vm_name: str) -> None:
-        """Attach a disk to a VM"""
-        return self.libvirt_manager.attach_disk(disk_id, vm_name)
-
-    def detach_disk(self, disk_id: str) -> None:
-        """Detach a disk from its VM"""
-        return self.libvirt_manager.detach_disk(disk_id)
-
-    def get_disk(self, disk_id: str) -> Optional[Dict]:
-        """Get disk details"""
-        return self.libvirt_manager.get_disk(disk_id)
-
-    def resize_disk(self, disk_id: str, new_size_gb: int) -> None:
-        """Resize a disk"""
-        return self.libvirt_manager.resize_disk(disk_id, new_size_gb)
-
-    def get_machine_disks(self, vm_name: str) -> List[Dict]:
-        """Get all disks attached to a VM"""
-        return self.libvirt_manager.get_machine_disks(vm_name)
+        try:
+            # Validate architecture compatibility
+            if config.arch:
+                current_arch = platform.machine().lower()
+                if 'arm' in current_arch or 'aarch64' in current_arch:
+                    if config.arch.lower() not in ['arm64', 'aarch64']:
+                        raise VMError(f"Architecture {config.arch} not supported on this ARM platform")
+                elif config.arch.lower() not in ['x86_64', 'amd64']:
+                    raise VMError(f"Architecture {config.arch} not supported on this x86 platform")
+            
+            # Prepare cloud-init config if provided
+            cloud_init_iso = self._prepare_cloud_init_config(config)
+            
+            # Create VM with existing logic...
+            
+            # Attach cloud-init ISO if created
+            if cloud_init_iso:
+                self._attach_cloud_init_iso(vm_name, cloud_init_iso)
+            
+            return vm
+            
+        except Exception as e:
+            logger.error(f"Failed to create VM: {e}")
+            # Cleanup any created resources
+            self._cleanup_failed_vm(config.name)
+            raise VMError(f"Failed to create VM: {e}")
+            
+    def _attach_cloud_init_iso(self, vm_name: str, iso_path: str):
+        """Attach cloud-init ISO to the VM."""
+        try:
+            domain = self.conn.lookupByName(vm_name)
+            
+            # Generate disk XML
+            disk_xml = f"""
+            <disk type='file' device='cdrom'>
+                <driver name='qemu' type='raw'/>
+                <source file='{iso_path}'/>
+                <target dev='hdc' bus='ide'/>
+                <readonly/>
+            </disk>
+            """
+            
+            domain.attachDevice(disk_xml)
+            
+        except Exception as e:
+            logger.error(f"Failed to attach cloud-init ISO: {e}")
+            raise VMError(f"Failed to attach cloud-init ISO: {e}")
+            
+    def _cleanup_failed_vm(self, vm_name: str):
+        """Cleanup resources after failed VM creation."""
+        try:
+            # Remove cloud-init ISO if it exists
+            iso_path = f"/var/lib/libvirt/images/cloud-init-{vm_name}.iso"
+            if os.path.exists(iso_path):
+                os.remove(iso_path)
+                
+            # Existing cleanup logic...
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
 
 class VMConsole:
     def __init__(self, vm: VM, libvirt_manager: LibvirtManager):

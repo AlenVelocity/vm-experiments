@@ -1,0 +1,402 @@
+{
+	"info": {
+		"_postman_id": "random-uuid",
+		"name": "VM Experiments API",
+		"description": "Collection for testing VM management, VPC, networking, and migration APIs",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "VM Management",
+			"item": [
+				{
+					"name": "List VMs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/vms",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms"]
+						}
+					}
+				},
+				{
+					"name": "Create VM (Basic)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"test-vm\",\n    \"network_name\": \"default\",\n    \"cpu_cores\": 2,\n    \"memory_mb\": 2048,\n    \"disk_size_gb\": 20,\n    \"image_id\": \"ubuntu-20.04\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vms/create",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "create"]
+						},
+						"description": "Create a basic VM without cloud-init configuration"
+					}
+				},
+				{
+					"name": "Create VM (with Cloud-Init)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"test-vm-cloud-init\",\n    \"network_name\": \"default\",\n    \"cpu_cores\": 2,\n    \"memory_mb\": 2048,\n    \"disk_size_gb\": 20,\n    \"image_id\": \"ubuntu-20.04\",\n    \"arch\": \"x86_64\",\n    \"cloud_init\": {\n        \"hostname\": \"test-vm\",\n        \"users\": [\n            {\n                \"name\": \"admin\",\n                \"sudo\": \"ALL=(ALL) NOPASSWD:ALL\",\n                \"shell\": \"/bin/bash\",\n                \"ssh_authorized_keys\": [\n                    \"ssh-rsa AAAA...\"\n                ]\n            }\n        ],\n        \"packages\": [\n            \"nginx\",\n            \"docker.io\",\n            \"python3-pip\"\n        ],\n        \"runcmd\": [\n            \"systemctl enable nginx\",\n            \"systemctl start nginx\",\n            \"systemctl enable docker\",\n            \"systemctl start docker\"\n        ],\n        \"write_files\": [\n            {\n                \"path\": \"/etc/nginx/sites-available/default\",\n                \"content\": \"server {\\n    listen 80 default_server;\\n    server_name _;\\n    location / {\\n        return 200 'Hello from cloud-init!';\\n    }\\n}\"\n            }\n        ],\n        \"timezone\": \"UTC\",\n        \"apt\": {\n            \"sources\": {\n                \"docker.list\": {\n                    \"source\": \"deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable\",\n                    \"keyid\": \"9DC858229FC7DD38854AE2D88D81803C0EBFCD88\"\n                }\n            }\n        }\n    }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vms/create",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "create"]
+						},
+						"description": "Create a VM with cloud-init configuration and architecture specification"
+					}
+				},
+				{
+					"name": "Create VM (ARM64)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"test-vm-arm\",\n    \"network_name\": \"default\",\n    \"cpu_cores\": 2,\n    \"memory_mb\": 2048,\n    \"disk_size_gb\": 20,\n    \"image_id\": \"ubuntu-20.04\",\n    \"arch\": \"aarch64\",\n    \"cloud_init\": {\n        \"hostname\": \"test-vm-arm\",\n        \"users\": [\n            {\n                \"name\": \"admin\",\n                \"sudo\": \"ALL=(ALL) NOPASSWD:ALL\",\n                \"shell\": \"/bin/bash\"\n            }\n        ],\n        \"packages\": [\n            \"python3-pip\",\n            \"build-essential\"\n        ],\n        \"timezone\": \"UTC\"\n    }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vms/create",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "create"]
+						},
+						"description": "Create a VM specifically for ARM64 architecture"
+					}
+				},
+				{
+					"name": "Resize VM",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"cpu_cores\": 4,\n    \"memory_mb\": 4096\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vms/{{vm_id}}/resize",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "{{vm_id}}", "resize"]
+						}
+					}
+				},
+				{
+					"name": "Get VM Console",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/vms/{{vm_id}}/console",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "{{vm_id}}", "console"]
+						}
+					}
+				},
+				{
+					"name": "Get VM Metrics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/vms/{{vm_id}}/metrics",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "{{vm_id}}", "metrics"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "VPC Management",
+			"item": [
+				{
+					"name": "List VPCs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/vpcs",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vpcs"]
+						}
+					}
+				},
+				{
+					"name": "Create VPC",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"test-vpc\",\n    \"cidr\": \"192.168.0.0/16\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vpcs/create",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vpcs", "create"]
+						}
+					}
+				},
+				{
+					"name": "Delete VPC",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/vpcs/{{vpc_name}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vpcs", "{{vpc_name}}"]
+						}
+					}
+				},
+				{
+					"name": "Add Subnet",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"subnet-1\",\n    \"cidr\": \"192.168.1.0/24\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vpcs/{{vpc_name}}/subnets",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vpcs", "{{vpc_name}}", "subnets"]
+						}
+					}
+				},
+				{
+					"name": "Remove Subnet",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/vpcs/{{vpc_name}}/subnets/{{subnet_name}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vpcs", "{{vpc_name}}", "subnets", "{{subnet_name}}"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Disk Management",
+			"item": [
+				{
+					"name": "List Disks",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/disks",
+							"host": ["{{base_url}}"],
+							"path": ["api", "disks"]
+						}
+					}
+				},
+				{
+					"name": "Create Disk",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"test-disk\",\n    \"size_gb\": 50\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/disks/create",
+							"host": ["{{base_url}}"],
+							"path": ["api", "disks", "create"]
+						}
+					}
+				},
+				{
+					"name": "Attach Disk",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"disk_id\": \"disk-123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vms/{{vm_id}}/disks/attach",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "{{vm_id}}", "disks", "attach"]
+						}
+					}
+				},
+				{
+					"name": "Detach Disk",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"disk_id\": \"disk-123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/vms/{{vm_id}}/disks/detach",
+							"host": ["{{base_url}}"],
+							"path": ["api", "vms", "{{vm_id}}", "disks", "detach"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Image Management",
+			"item": [
+				{
+					"name": "List Images",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/images",
+							"host": ["{{base_url}}"],
+							"path": ["api", "images"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Migration",
+			"item": [
+				{
+					"name": "List Migrations",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/migrations",
+							"host": ["{{base_url}}"],
+							"path": ["api", "migrations"]
+						}
+					}
+				},
+				{
+					"name": "Start Migration",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"vm_name\": \"test-vm\",\n    \"destination_uri\": \"qemu+ssh://destination-host/system\",\n    \"migration_type\": \"direct\",\n    \"bandwidth\": 1000000,\n    \"max_downtime\": 500,\n    \"compressed\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/migrations/start",
+							"host": ["{{base_url}}"],
+							"path": ["api", "migrations", "start"]
+						}
+					}
+				},
+				{
+					"name": "Get Migration Status",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/migrations/{{vm_name}}/status",
+							"host": ["{{base_url}}"],
+							"path": ["api", "migrations", "{{vm_name}}", "status"]
+						}
+					}
+				},
+				{
+					"name": "Cancel Migration",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/migrations/{{vm_name}}/cancel",
+							"host": ["{{base_url}}"],
+							"path": ["api", "migrations", "{{vm_name}}", "cancel"]
+						}
+					}
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:5000"
+		},
+		{
+			"key": "vm_id",
+			"value": "test-vm-id"
+		},
+		{
+			"key": "vpc_name",
+			"value": "test-vpc"
+		},
+		{
+			"key": "subnet_name",
+			"value": "subnet-1"
+		},
+		{
+			"key": "vm_name",
+			"value": "test-vm"
+		}
+	]
+} 
