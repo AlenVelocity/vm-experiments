@@ -208,7 +208,19 @@ def list_vms():
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/vms/create', methods=['POST'])
+@app.route('/api/vms/<vm_id>', methods=['GET'])
+def get_vm(vm_id):
+    try:
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+        return jsonify({'vm': asdict(vm)})
+    except Exception as e:
+        logger.error(f"Error getting VM: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms', methods=['POST'])
 @validate_request(VMCreateSchema)
 def create_vm():
     try:
@@ -240,9 +252,23 @@ def create_vm():
             return jsonify({'error': f"VM with name {config.name} already exists"}), 400
             
         vm = vm_manager.create_vm(config)
-        return jsonify({'vm': asdict(vm)})
+        return jsonify({'vm': asdict(vm)}), 201
     except Exception as e:
         logger.error(f"Error creating VM: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/<vm_id>', methods=['DELETE'])
+def delete_vm(vm_id):
+    try:
+        vm = vm_manager.get_vm(vm_id)
+        if not vm:
+            return jsonify({'error': 'VM not found'}), 404
+            
+        vm_manager.delete_vm(vm_id)
+        return jsonify({'success': True, 'message': f"VM {vm_id} deleted successfully"})
+    except Exception as e:
+        logger.error(f"Error deleting VM: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
@@ -250,36 +276,45 @@ def create_vm():
 def resize_vm(vm_id):
     try:
         data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
         vm = vm_manager.get_vm(vm_id)
         if not vm:
             return jsonify({'error': 'VM not found'}), 404
         
         if 'cpu_cores' in data:
+            if not isinstance(data['cpu_cores'], int) or data['cpu_cores'] < 1:
+                return jsonify({'error': 'Invalid CPU cores value'}), 400
             vm_manager.resize_cpu(vm, data['cpu_cores'])
+            
         if 'memory_mb' in data:
+            if not isinstance(data['memory_mb'], int) or data['memory_mb'] < 512:
+                return jsonify({'error': 'Invalid memory value'}), 400
             vm_manager.resize_memory(vm, data['memory_mb'])
         
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': f"VM {vm_id} resized successfully"})
     except Exception as e:
         logger.error(f"Error resizing VM: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/vms/<vm_id>/console', methods=['GET'])
-def get_vm_console(vm_id):
+@app.route('/api/vms/<vm_id>/status', methods=['GET'])
+def get_vm_status(vm_id):
     try:
         vm = vm_manager.get_vm(vm_id)
         if not vm:
             return jsonify({'error': 'VM not found'}), 404
-        
-        console_url = vm_manager.get_console_url(vm)
-        return jsonify({'console_url': console_url})
+            
+        status = vm_manager.get_vm_status(vm_id)
+        return jsonify({'status': status})
     except Exception as e:
-        logger.error(f"Error getting VM console: {str(e)}")
+        logger.error(f"Error getting VM status: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/vms/<vm_id>/metrics', methods=['GET'])
+@cache.cached(timeout=30, key_prefix=cache_key_prefix)
 def get_vm_metrics(vm_id):
     try:
         vm = vm_manager.get_vm(vm_id)
@@ -305,7 +340,7 @@ def list_vpcs():
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/vpcs/create', methods=['POST'])
+@app.route('/api/vpcs', methods=['POST'])
 @validate_request(VPCCreateSchema)
 def create_vpc():
     try:
@@ -318,7 +353,7 @@ def create_vpc():
             return jsonify({'error': f'VPC {name} already exists'}), 400
             
         vpc = vpc_manager.create_vpc(name, cidr)
-        return jsonify({'vpc': vpc.to_dict()})
+        return jsonify({'vpc': vpc.to_dict()}), 201
     except (VPCError, NetworkError) as e:
         logger.error(f"Error creating VPC: {str(e)}")
         return jsonify({'error': str(e)}), 400
@@ -327,13 +362,25 @@ def create_vpc():
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/vpcs/<name>', methods=['DELETE'])
-def delete_vpc(name):
+@app.route('/api/vpcs/<vpc_name>', methods=['GET'])
+def get_vpc(vpc_name):
     try:
-        success = vpc_manager.delete_vpc(name)
+        vpc = vpc_manager.get_vpc(vpc_name)
+        if not vpc:
+            return jsonify({'error': 'VPC not found'}), 404
+        return jsonify({'vpc': vpc.to_dict()})
+    except Exception as e:
+        logger.error(f"Error getting VPC: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vpcs/<vpc_name>', methods=['DELETE'])
+def delete_vpc(vpc_name):
+    try:
+        success = vpc_manager.delete_vpc(vpc_name)
         if not success:
             return jsonify({'error': 'VPC not found'}), 404
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': f"VPC {vpc_name} deleted successfully"})
     except (VPCError, NetworkError) as e:
         logger.error(f"Error deleting VPC: {str(e)}")
         return jsonify({'error': str(e)}), 400
@@ -355,7 +402,7 @@ def add_subnet(vpc_name):
             return jsonify({'error': 'Failed to add subnet'}), 400
         
         vpc = vpc_manager.get_vpc(vpc_name)
-        return jsonify({'vpc': vpc.to_dict()})
+        return jsonify({'vpc': vpc.to_dict()}), 201
     except (VPCError, NetworkError) as e:
         logger.error(f"Error adding subnet: {str(e)}")
         return jsonify({'error': str(e)}), 400
@@ -370,7 +417,7 @@ def remove_subnet(vpc_name, subnet_name):
         success = vpc_manager.remove_subnet(vpc_name, subnet_name)
         if not success:
             return jsonify({'error': 'Subnet not found'}), 404
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': f"Subnet {subnet_name} removed from VPC {vpc_name}"})
     except (VPCError, NetworkError) as e:
         logger.error(f"Error removing subnet: {str(e)}")
         return jsonify({'error': str(e)}), 400
@@ -448,7 +495,6 @@ def list_images():
 # Migration Routes
 @app.route('/api/migrations', methods=['GET'])
 def list_migrations():
-    """List all active and recent migrations."""
     try:
         migrations = migration_manager.list_migrations()
         return jsonify({'migrations': migrations})
@@ -457,10 +503,9 @@ def list_migrations():
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/migrations/start', methods=['POST'])
+@app.route('/api/migrations', methods=['POST'])
 @validate_request(MigrationCreateSchema)
 def start_migration():
-    """Start a new VM migration."""
     try:
         data = request.json
         config = MigrationConfig(
@@ -476,7 +521,7 @@ def start_migration():
         return jsonify({
             'success': True, 
             'message': f"Started {config.migration_type.value} migration of VM {config.vm_name}"
-        })
+        }), 201
     except MigrationError as e:
         logger.error(f"Migration error: {str(e)}")
         return jsonify({'error': str(e)}), 400
@@ -487,7 +532,6 @@ def start_migration():
 
 @app.route('/api/migrations/<vm_name>/status', methods=['GET'])
 def get_migration_status(vm_name):
-    """Get status of a VM migration."""
     try:
         status = migration_manager.get_migration_status(vm_name)
         if status is None:
@@ -509,9 +553,8 @@ def get_migration_status(vm_name):
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/migrations/<vm_name>/cancel', methods=['POST'])
+@app.route('/api/migrations/<vm_name>', methods=['DELETE'])
 def cancel_migration(vm_name):
-    """Cancel an ongoing migration."""
     try:
         migration_manager.cancel_migration(vm_name)
         return jsonify({'success': True, 'message': f"Cancelled migration of VM {vm_name}"})
