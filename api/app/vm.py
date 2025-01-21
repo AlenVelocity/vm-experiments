@@ -11,7 +11,7 @@ import uuid
 import socket
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import libvirt
 import xml.etree.ElementTree as ET
 from .networking import NetworkManager, NetworkType
@@ -25,6 +25,7 @@ from .db import db
 import random
 import string
 import platform
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,6 +41,26 @@ class VMConfig:
     cloud_init: Optional[dict] = None
     arch: Optional[str] = None
 
+class VMStatus:
+    CREATING = 'creating'
+    RUNNING = 'running'
+    STOPPED = 'stopped'
+    ERROR = 'error'
+    DELETING = 'deleting'
+    NOT_FOUND = 'not_found'
+
+class VMError(Exception):
+    """Custom exception for VM operations"""
+    pass
+
+@dataclass
+class VMMetrics:
+    cpu_usage: float
+    memory_usage: float
+    disk_usage: Dict[str, float]
+    network_usage: Dict[str, Dict[str, int]]
+    timestamp: float
+
 @dataclass
 class VM:
     id: str
@@ -47,7 +68,35 @@ class VM:
     config: VMConfig
     network_info: Optional[Dict] = None
     ssh_port: Optional[int] = None
-    status: Optional[str] = None
+    status: str = VMStatus.CREATING
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    metrics_history: List[VMMetrics] = field(default_factory=list)
+    error_message: Optional[str] = None
+
+    def to_dict(self) -> Dict:
+        return {
+            'id': self.id,
+            'name': self.name,
+            'config': asdict(self.config),
+            'network_info': self.network_info,
+            'ssh_port': self.ssh_port,
+            'status': self.status,
+            'created_at': self.created_at,
+            'updated_at': self.updated_at,
+            'error_message': self.error_message
+        }
+
+    def update_status(self, status: str, error_message: Optional[str] = None) -> None:
+        self.status = status
+        self.error_message = error_message
+        self.updated_at = time.time()
+
+    def add_metrics(self, metrics: VMMetrics) -> None:
+        self.metrics_history.append(metrics)
+        # Keep only last 24 hours of metrics
+        cutoff_time = time.time() - 86400
+        self.metrics_history = [m for m in self.metrics_history if m.timestamp > cutoff_time]
 
 class LibvirtManager:
     def __init__(self):
@@ -207,8 +256,14 @@ ethernets:
             raise
 
     def create_vm(self, config: VMConfig) -> VM:
-        """Create a new VM."""
+        """Create a new VM with enhanced error handling and status tracking."""
+        vm = None
         try:
+            # Generate VM ID and create initial VM object
+            vm_id = str(uuid.uuid4())[:8]
+            vm = VM(id=vm_id, name=config.name, config=config)
+            self.vms[vm_id] = vm
+
             # Validate architecture compatibility
             if config.arch:
                 current_arch = platform.machine().lower()
@@ -217,117 +272,57 @@ ethernets:
                         raise VMError(f"Architecture {config.arch} not supported on this ARM platform")
                 elif config.arch.lower() not in ['x86_64', 'amd64']:
                     raise VMError(f"Architecture {config.arch} not supported on this x86 platform")
-            
-            # Prepare cloud-init config if provided
-            cloud_init_iso = self._prepare_cloud_init_config(config)
-            
-            # Generate a unique ID for the VM with hex digits at the end
-            vm_id = str(uuid.uuid4())[:8]  # Use first 8 chars of a real UUID for the ID
-            vm_uuid = str(uuid.uuid4())    # Generate a full UUID for libvirt
-            
+
             # Create VM directory
             vm_dir = self.vm_dir / vm_id
             vm_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Download or use cached Ubuntu image
-            image_id = config.image_id or 'ubuntu-20.04'
-            base_image = self._download_ubuntu_image(image_id)
-            
-            # Create VM disk using qcow2 format with absolute paths
-            disk_path = vm_dir / "disk.qcow2"
-            
-            # Convert paths to absolute
-            base_image_abs = str(base_image.absolute())
-            disk_path_abs = str(disk_path.absolute())
-            
-            logger.info(f"Creating VM disk with base image: {base_image_abs}")
-            logger.info(f"Target disk path: {disk_path_abs}")
-            
-            subprocess.run([
-                'qemu-img', 'create',
-                '-f', 'qcow2',
-                '-F', 'qcow2',
-                '-b', base_image_abs,
-                disk_path_abs,
-                f"{config.disk_size_gb}G"
-            ], check=True)
-            
-            vm = VM(id=vm_id, name=config.name, config=config)
+
+            # Download and prepare cloud image
+            vm.update_status("downloading_image")
+            cloud_image = self._prepare_cloud_image(config.image_id or "ubuntu-22.04")
+
+            # Create and configure VM disk
+            vm.update_status("creating_disk")
+            vm_disk = vm_dir / f"{vm.name}.qcow2"
+            self._create_vm_disk(cloud_image, vm_disk, config.disk_size_gb)
+
+            # Set up networking
+            vm.update_status("configuring_network")
             vm.ssh_port = self._find_free_port()
+            vm.network_info = self._configure_networking(vm)
 
-            # Get network info
-            public_ip = self.ip_manager.get_available_ip()
-            if public_ip:
-                self.ip_manager.attach_ip(public_ip, vm_id)
-
-            # Calculate network details
-            vm_number = int(vm_id[:4], 16) % 254
-            subnet = (vm_number // 254) + 1
-            host = (vm_number % 254) + 1
-
-            vm.network_info = {
-                'private': {
-                    'ip': f"192.168.{subnet}.{host}",
-                    'subnet_mask': "255.255.255.0",
-                    'gateway': f"192.168.{subnet}.1",
-                    'network_name': config.network_name or 'default'
-                }
-            }
-
-            if public_ip:
-                vm.network_info['public'] = {
-                    'ip': public_ip,
-                    'subnet_mask': "255.255.255.0",
-                    'gateway': f"10.{subnet}.{host}.1",
-                    'network_name': f"{config.network_name}-public" if config.network_name else "default-public"
-                }
-
-            # Create cloud-init config
+            # Create cloud-init configuration
+            vm.update_status("creating_cloud_init")
             self._create_cloud_init_config(vm)
 
-            # Generate and define domain
-            domain_xml = self._generate_domain_xml(vm, disk_path, vm_uuid)
-            logger.info(f"Defining domain with XML:\n{domain_xml}")
-            
+            # Create and start the VM
+            vm.update_status("starting")
+            domain_xml = self._generate_domain_xml(vm, vm_disk)
             domain = self.conn.defineXML(domain_xml)
             if not domain:
-                raise Exception("Failed to define domain")
-            
-            # Start the domain
+                raise VMError("Failed to define VM domain")
+
             if domain.create() < 0:
-                raise Exception("Failed to start domain")
+                raise VMError("Failed to start VM")
 
             # Save VM to database
-            db.create_vm(vm_id, {
-                'name': vm.name,
-                'cpu_cores': config.cpu_cores,
-                'memory_mb': config.memory_mb,
-                'disk_size_gb': config.disk_size_gb,
-                'network_name': config.network_name,
-                'cloud_init': config.cloud_init,
-                'image_id': config.image_id,
-                'network_info': vm.network_info,
-                'ssh_port': vm.ssh_port,
-                'status': 'running',
-                'uuid': vm_uuid
-            })
+            self._save_vm(vm)
 
-            # Add to in-memory cache
-            self.vms[vm_id] = vm
+            # Start metrics collection
+            self._start_metrics_collection(vm)
 
-            # Attach cloud-init ISO if created
-            if cloud_init_iso:
-                self._attach_cloud_init_iso(vm.name, cloud_init_iso)
-
+            vm.update_status(VMStatus.RUNNING)
+            logger.info(f"Successfully created and started VM {vm.id}")
             return vm
 
         except Exception as e:
-            logger.error(f"Error creating VM: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            # Clean up on failure
-            if 'vm_id' in locals():
-                self.delete_vm(vm_id)
-            raise
+            error_msg = str(e)
+            logger.error(f"Error creating VM: {error_msg}")
+            if vm:
+                vm.update_status(VMStatus.ERROR, error_msg)
+                self._save_vm(vm)
+            self._cleanup_failed_vm(vm.id if vm else None)
+            raise VMError(f"Failed to create VM: {error_msg}")
 
     def _init_storage_pool(self):
         """Initialize the default storage pool for QEMU/KVM"""
@@ -916,6 +911,121 @@ ethernets:
             
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
+
+    def _start_metrics_collection(self, vm: VM) -> None:
+        """Start collecting metrics for the VM in a background thread."""
+        def collect_metrics():
+            while True:
+                try:
+                    if vm.status != VMStatus.RUNNING:
+                        break
+
+                    metrics = self.get_metrics(vm)
+                    if metrics:
+                        vm.add_metrics(VMMetrics(
+                            cpu_usage=metrics['cpu']['usage_percent'],
+                            memory_usage=metrics['memory']['used_percent'],
+                            disk_usage=metrics['disk'],
+                            network_usage=metrics['network'],
+                            timestamp=time.time()
+                        ))
+                        self._save_vm(vm)
+
+                    time.sleep(60)  # Collect metrics every minute
+                except Exception as e:
+                    logger.error(f"Error collecting metrics for VM {vm.id}: {e}")
+                    time.sleep(60)  # Wait before retrying
+
+        thread = threading.Thread(target=collect_metrics, daemon=True)
+        thread.start()
+
+    def get_vm_logs(self, vm_id: str, lines: int = 100) -> List[str]:
+        """Get recent logs for a VM."""
+        try:
+            vm = self.get_vm(vm_id)
+            if not vm:
+                raise VMError(f"VM {vm_id} not found")
+
+            domain = self.conn.lookupByName(vm.name)
+            if not domain:
+                raise VMError(f"VM domain {vm.name} not found")
+
+            # Get console output
+            stream = self.conn.newStream()
+            domain.openConsole(None, stream, 0)
+            
+            output = []
+            while len(output) < lines:
+                try:
+                    data = stream.recv(1024).decode()
+                    if not data:
+                        break
+                    output.extend(data.splitlines())
+                except:
+                    break
+
+            return output[-lines:] if output else []
+
+        except Exception as e:
+            logger.error(f"Error getting VM logs: {e}")
+            raise VMError(f"Failed to get VM logs: {e}")
+
+    def get_vm_statistics(self, vm_id: str) -> Dict:
+        """Get detailed statistics for a VM."""
+        try:
+            vm = self.get_vm(vm_id)
+            if not vm:
+                raise VMError(f"VM {vm_id} not found")
+
+            # Get current metrics
+            current_metrics = self.get_metrics(vm)
+
+            # Calculate historical statistics
+            if vm.metrics_history:
+                avg_cpu = sum(m.cpu_usage for m in vm.metrics_history) / len(vm.metrics_history)
+                avg_memory = sum(m.memory_usage for m in vm.metrics_history) / len(vm.metrics_history)
+                
+                # Calculate network statistics
+                network_stats = {
+                    'total_rx_bytes': 0,
+                    'total_tx_bytes': 0,
+                    'avg_rx_bytes_per_second': 0,
+                    'avg_tx_bytes_per_second': 0
+                }
+                
+                for metrics in vm.metrics_history:
+                    for interface in metrics.network_usage.values():
+                        network_stats['total_rx_bytes'] += interface.get('rx_bytes', 0)
+                        network_stats['total_tx_bytes'] += interface.get('tx_bytes', 0)
+                
+                time_period = vm.metrics_history[-1].timestamp - vm.metrics_history[0].timestamp
+                if time_period > 0:
+                    network_stats['avg_rx_bytes_per_second'] = network_stats['total_rx_bytes'] / time_period
+                    network_stats['avg_tx_bytes_per_second'] = network_stats['total_tx_bytes'] / time_period
+            else:
+                avg_cpu = 0
+                avg_memory = 0
+                network_stats = {
+                    'total_rx_bytes': 0,
+                    'total_tx_bytes': 0,
+                    'avg_rx_bytes_per_second': 0,
+                    'avg_tx_bytes_per_second': 0
+                }
+
+            return {
+                'current': current_metrics,
+                'historical': {
+                    'avg_cpu_usage': avg_cpu,
+                    'avg_memory_usage': avg_memory,
+                    'network': network_stats,
+                    'uptime': time.time() - vm.created_at,
+                    'total_metrics_collected': len(vm.metrics_history)
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting VM statistics: {e}")
+            raise VMError(f"Failed to get VM statistics: {e}")
 
 class VMManager:
     def __init__(self, network_manager: NetworkManager):

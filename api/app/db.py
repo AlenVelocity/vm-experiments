@@ -1,187 +1,295 @@
+import sqlite3
 import json
-import os
-from pathlib import Path
-from typing import Dict, List, Any, Optional
 import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+from contextlib import contextmanager
+import time
 
 logger = logging.getLogger(__name__)
 
+class DatabaseError(Exception):
+    """Custom exception for database operations"""
+    pass
+
 class Database:
     def __init__(self):
-        self.db_dir = Path(__file__).parent.parent / "data"
-        self.db_dir.mkdir(parents=True, exist_ok=True)
-        self.vms_file = self.db_dir / "vms.json"
-        self.disks_file = self.db_dir / "disks.json"
-        self.ips_file = self.db_dir / "ips.json"
-        self._ensure_files_exist()
+        self.db_path = Path("api/data/vm.db")
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
 
-    def _ensure_files_exist(self):
-        """Ensure database files exist"""
-        if not self.vms_file.exists():
-            self.vms_file.write_text("{}")
-        if not self.disks_file.exists():
-            self.disks_file.write_text("{}")
-        if not self.ips_file.exists():
-            self.ips_file.write_text('{"ips": {}}')
-
-    def _load_vms(self) -> Dict[str, Any]:
-        """Load VMs from the database file"""
+    @contextmanager
+    def get_connection(self):
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
         try:
-            return json.loads(self.vms_file.read_text())
+            yield conn
+            conn.commit()
         except Exception as e:
-            logger.error(f"Error loading VMs: {str(e)}")
-            return {}
+            conn.rollback()
+            raise DatabaseError(f"Database error: {e}")
+        finally:
+            conn.close()
 
-    def _save_vms(self, vms: Dict[str, Any]):
-        """Save VMs to the database file"""
-        try:
-            self.vms_file.write_text(json.dumps(vms, indent=2))
-        except Exception as e:
-            logger.error(f"Error saving VMs: {str(e)}")
-            raise
+    def _init_db(self):
+        with self.get_connection() as conn:
+            # Create VMs table with enhanced fields
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS vms (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                config TEXT NOT NULL,
+                network_info TEXT,
+                ssh_port INTEGER,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                error_message TEXT
+            )
+            """)
 
-    def list_vms(self) -> List[Dict[str, Any]]:
-        """List all VMs"""
-        vms = self._load_vms()
-        return [{"id": vm_id, **vm_data} for vm_id, vm_data in vms.items()]
+            # Create VM metrics table
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS vm_metrics (
+                vm_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                cpu_usage REAL NOT NULL,
+                memory_usage REAL NOT NULL,
+                disk_usage TEXT NOT NULL,
+                network_usage TEXT NOT NULL,
+                FOREIGN KEY (vm_id) REFERENCES vms(id) ON DELETE CASCADE,
+                PRIMARY KEY (vm_id, timestamp)
+            )
+            """)
 
-    def get_vm(self, vm_id: str) -> Dict[str, Any]:
-        """Get a VM by ID"""
-        vms = self._load_vms()
-        vm_data = vms.get(vm_id)
-        if vm_data:
-            return {"id": vm_id, **vm_data}
+            # Create networks table
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS networks (
+                name TEXT PRIMARY KEY,
+                cidr TEXT NOT NULL,
+                bridge TEXT NOT NULL,
+                gateway TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """)
+
+            # Create DHCP leases table
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS dhcp_leases (
+                network_name TEXT NOT NULL,
+                mac TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                lease_time INTEGER NOT NULL,
+                start_time REAL NOT NULL,
+                renewed_time REAL NOT NULL,
+                FOREIGN KEY (network_name) REFERENCES networks(name) ON DELETE CASCADE,
+                PRIMARY KEY (network_name, mac)
+            )
+            """)
+
+            # Create firewall rules table
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS firewall_rules (
+                id TEXT PRIMARY KEY,
+                network_name TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                port_range TEXT NOT NULL,
+                source TEXT NOT NULL,
+                description TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (network_name) REFERENCES networks(name) ON DELETE CASCADE
+            )
+            """)
+
+            # Create storage volumes table
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS storage_volumes (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                size_gb INTEGER NOT NULL,
+                vm_id TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (vm_id) REFERENCES vms(id) ON DELETE SET NULL
+            )
+            """)
+
+    def save_vm(self, vm_id: str, data: Dict[str, Any]) -> None:
+        with self.get_connection() as conn:
+            now = time.time()
+            conn.execute("""
+            INSERT OR REPLACE INTO vms (
+                id, name, config, network_info, ssh_port, status,
+                created_at, updated_at, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                vm_id,
+                data['name'],
+                json.dumps(data['config']),
+                json.dumps(data.get('network_info')),
+                data.get('ssh_port'),
+                data.get('status', 'creating'),
+                data.get('created_at', now),
+                now,
+                data.get('error_message')
+            ))
+
+    def save_vm_metrics(self, vm_id: str, metrics: Dict[str, Any]) -> None:
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT INTO vm_metrics (
+                vm_id, timestamp, cpu_usage, memory_usage,
+                disk_usage, network_usage
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                vm_id,
+                metrics['timestamp'],
+                metrics['cpu_usage'],
+                metrics['memory_usage'],
+                json.dumps(metrics['disk_usage']),
+                json.dumps(metrics['network_usage'])
+            ))
+
+    def get_vm_metrics(self, vm_id: str, start_time: float, end_time: float) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+            SELECT * FROM vm_metrics
+            WHERE vm_id = ? AND timestamp BETWEEN ? AND ?
+            ORDER BY timestamp ASC
+            """, (vm_id, start_time, end_time))
+            return [
+                {
+                    'timestamp': row['timestamp'],
+                    'cpu_usage': row['cpu_usage'],
+                    'memory_usage': row['memory_usage'],
+                    'disk_usage': json.loads(row['disk_usage']),
+                    'network_usage': json.loads(row['network_usage'])
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def save_network(self, name: str, data: Dict[str, Any]) -> None:
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO networks (
+                name, cidr, bridge, gateway, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """, (
+                name,
+                data['cidr'],
+                data['bridge'],
+                data['gateway'],
+                time.time()
+            ))
+
+    def save_dhcp_lease(self, network_name: str, lease: Dict[str, Any]) -> None:
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO dhcp_leases (
+                network_name, mac, ip, hostname, lease_time,
+                start_time, renewed_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                network_name,
+                lease['mac'],
+                lease['ip'],
+                lease['hostname'],
+                lease['lease_time'],
+                lease['start_time'],
+                lease['renewed_time']
+            ))
+
+    def get_network_leases(self, network_name: str) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+            SELECT * FROM dhcp_leases WHERE network_name = ?
+            """, (network_name,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def save_firewall_rule(self, rule_id: str, data: Dict[str, Any]) -> None:
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO firewall_rules (
+                id, network_name, direction, protocol, port_range,
+                source, description, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                rule_id,
+                data['network_name'],
+                data['direction'],
+                data['protocol'],
+                data['port_range'],
+                data['source'],
+                data.get('description'),
+                time.time()
+            ))
+
+    def get_firewall_rules(self, network_name: str) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+            SELECT * FROM firewall_rules WHERE network_name = ?
+            """, (network_name,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def save_storage_volume(self, volume_id: str, data: Dict[str, Any]) -> None:
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO storage_volumes (
+                id, name, size_gb, vm_id, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """, (
+                volume_id,
+                data['name'],
+                data['size_gb'],
+                data.get('vm_id'),
+                time.time()
+            ))
+
+    def get_storage_volumes(self, vm_id: Optional[str] = None) -> List[Dict]:
+        with self.get_connection() as conn:
+            if vm_id:
+                cursor = conn.execute("""
+                SELECT * FROM storage_volumes WHERE vm_id = ?
+                """, (vm_id,))
+            else:
+                cursor = conn.execute("SELECT * FROM storage_volumes")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_vm(self, vm_id: str) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM vms WHERE id = ?", (vm_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    **dict(row),
+                    'config': json.loads(row['config']),
+                    'network_info': json.loads(row['network_info']) if row['network_info'] else None
+                }
         return None
 
-    def create_vm(self, vm_id: str, data: Dict[str, Any]):
-        """Create a new VM"""
-        vms = self._load_vms()
-        if vm_id in vms:
-            raise Exception(f"VM with ID {vm_id} already exists")
-        vms[vm_id] = data
-        self._save_vms(vms)
+    def list_vms(self) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM vms")
+            return [
+                {
+                    **dict(row),
+                    'config': json.loads(row['config']),
+                    'network_info': json.loads(row['network_info']) if row['network_info'] else None
+                }
+                for row in cursor.fetchall()
+            ]
 
-    def update_vm(self, vm_id: str, data: Dict[str, Any]):
-        """Update an existing VM"""
-        vms = self._load_vms()
-        if vm_id not in vms:
-            raise Exception(f"VM with ID {vm_id} not found")
-        vms[vm_id] = data
-        self._save_vms(vms)
+    def delete_vm(self, vm_id: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM vms WHERE id = ?", (vm_id,))
+            conn.execute("DELETE FROM vm_metrics WHERE vm_id = ?", (vm_id,))
 
-    def delete_vm(self, vm_id: str):
-        """Delete a VM"""
-        vms = self._load_vms()
-        if vm_id not in vms:
-            raise Exception(f"VM with ID {vm_id} not found")
-        del vms[vm_id]
-        self._save_vms(vms)
-
-    def _load_disks(self) -> Dict[str, Any]:
-        """Load disks from the database file"""
-        try:
-            return json.loads(self.disks_file.read_text())
-        except Exception as e:
-            logger.error(f"Error loading disks: {str(e)}")
-            return {}
-
-    def _save_disks(self, disks: Dict[str, Any]):
-        """Save disks to the database file"""
-        try:
-            self.disks_file.write_text(json.dumps(disks, indent=2))
-        except Exception as e:
-            logger.error(f"Error saving disks: {str(e)}")
-            raise
-
-    def list_disks(self) -> List[Dict[str, Any]]:
-        """List all disks"""
-        disks = self._load_disks()
-        return [{"id": disk_id, **disk_data} for disk_id, disk_data in disks.items()]
-
-    def get_disk(self, disk_id: str) -> Dict[str, Any]:
-        """Get a disk by ID"""
-        disks = self._load_disks()
-        disk_data = disks.get(disk_id)
-        if disk_data:
-            return {"id": disk_id, **disk_data}
-        return None
-
-    def create_disk(self, disk_id: str, data: Dict[str, Any]):
-        """Create a new disk"""
-        disks = self._load_disks()
-        if disk_id in disks:
-            raise Exception(f"Disk with ID {disk_id} already exists")
-        disks[disk_id] = data
-        self._save_disks(disks)
-
-    def update_disk(self, disk_id: str, data: Dict[str, Any]):
-        """Update an existing disk"""
-        disks = self._load_disks()
-        if disk_id not in disks:
-            raise Exception(f"Disk with ID {disk_id} not found")
-        disks[disk_id] = data
-        self._save_disks(disks)
-
-    def delete_disk(self, disk_id: str):
-        """Delete a disk"""
-        disks = self._load_disks()
-        if disk_id not in disks:
-            raise Exception(f"Disk with ID {disk_id} not found")
-        del disks[disk_id]
-        self._save_disks(disks)
-
-    def _load_ips(self) -> Dict[str, Any]:
-        """Load IPs from the database file"""
-        try:
-            return json.loads(self.ips_file.read_text())
-        except Exception as e:
-            logger.error(f"Error loading IPs: {str(e)}")
-            return {"ips": {}}
-
-    def _save_ips(self, data: Dict[str, Any]):
-        """Save IPs to the database file"""
-        try:
-            self.ips_file.write_text(json.dumps(data, indent=2))
-        except Exception as e:
-            logger.error(f"Error saving IPs: {str(e)}")
-            raise
-
-    def list_ips(self) -> List[Dict[str, Any]]:
-        """List all IPs"""
-        data = self._load_ips()
-        return [{"ip": ip, **ip_data} for ip, ip_data in data.get("ips", {}).items()]
-
-    def get_ip(self, ip: str) -> Optional[Dict[str, Any]]:
-        """Get IP data"""
-        data = self._load_ips()
-        ip_data = data.get("ips", {}).get(ip)
-        if ip_data:
-            return {"ip": ip, **ip_data}
-        return None
-
-    def create_ip(self, ip: str, data: Dict[str, Any]):
-        """Create a new IP entry"""
-        all_data = self._load_ips()
-        if ip in all_data.get("ips", {}):
-            raise Exception(f"IP {ip} already exists")
-        all_data.setdefault("ips", {})[ip] = data
-        self._save_ips(all_data)
-
-    def update_ip(self, ip: str, data: Dict[str, Any]):
-        """Update an existing IP entry"""
-        all_data = self._load_ips()
-        if ip not in all_data.get("ips", {}):
-            raise Exception(f"IP {ip} not found")
-        all_data["ips"][ip].update(data)
-        self._save_ips(all_data)
-
-    def delete_ip(self, ip: str):
-        """Delete an IP entry"""
-        all_data = self._load_ips()
-        if ip not in all_data.get("ips", {}):
-            raise Exception(f"IP {ip} not found")
-        del all_data["ips"][ip]
-        self._save_ips(all_data)
+    def cleanup_old_metrics(self, max_age_seconds: int = 86400 * 7) -> None:
+        """Clean up metrics older than the specified age (default 7 days)"""
+        with self.get_connection() as conn:
+            cutoff_time = time.time() - max_age_seconds
+            conn.execute("DELETE FROM vm_metrics WHERE timestamp < ?", (cutoff_time,))
 
 # Create a global database instance
 db = Database() 
