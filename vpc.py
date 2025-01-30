@@ -8,7 +8,7 @@ class VPCError(Exception):
     pass
 
 class VPC:
-    def __init__(self, name: str, cidr: str = "192.168.0.0/16"):
+    def __init__(self, name: str, cidr: str = "10.0.0.0/24"):
         if not name:
             raise VPCError("VPC name cannot be empty")
         
@@ -18,7 +18,8 @@ class VPC:
             self.cidr = str(self.network)  # Normalize CIDR notation
             self.used_private_ips: List[str] = []
             self.used_public_ips: List[str] = []
-            self.public_network = ipaddress.ip_network("10.0.0.0/16")
+            # Use a different range for public IPs to avoid conflicts
+            self.public_network = ipaddress.ip_network("172.16.0.0/24")
         except ValueError as e:
             raise VPCError(f"Invalid CIDR format: {str(e)}")
         
@@ -46,9 +47,11 @@ class VPC:
         return vpc
 
     def _get_next_available_ip(self, network: ipaddress.IPv4Network, used_ips: List[str]) -> str:
-        """Get next available IP from the network"""
+        """Get next available IP from the network, skipping network and broadcast addresses"""
         try:
-            for ip in network.hosts():
+            # Skip the first IP (network address) and last IP (broadcast)
+            available_ips = list(network.hosts())[1:-1]
+            for ip in available_ips:
                 ip_str = str(ip)
                 if ip_str not in used_ips:
                     used_ips.append(ip_str)
@@ -65,10 +68,19 @@ class VPC:
             
             return {
                 "private_ip": private_ip,
-                "public_ip": public_ip
+                "public_ip": public_ip,
+                "netmask": str(self.network.netmask),
+                "gateway": str(list(self.network.hosts())[0])  # First usable IP as gateway
             }
         except Exception as e:
             raise VPCError(f"Error allocating IP pair: {str(e)}")
+
+    def release_ip(self, private_ip: str, public_ip: str) -> None:
+        """Release allocated IP addresses back to the pool"""
+        if private_ip in self.used_private_ips:
+            self.used_private_ips.remove(private_ip)
+        if public_ip in self.used_public_ips:
+            self.used_public_ips.remove(public_ip)
 
 class VPCManager:
     _instance = None
@@ -111,7 +123,7 @@ class VPCManager:
         except Exception as e:
             raise VPCError(f"Error saving VPCs: {str(e)}")
 
-    def create_vpc(self, name: str, cidr: str = "192.168.0.0/16") -> VPC:
+    def create_vpc(self, name: str, cidr: str = "10.0.0.0/24") -> VPC:
         if not name:
             raise VPCError("VPC name cannot be empty")
         if name in self.vpcs:
