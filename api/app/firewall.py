@@ -5,8 +5,12 @@ import subprocess
 import ipaddress
 import uuid
 from typing import Dict, List, Optional
+from flask import Blueprint, request, jsonify
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+firewall = Blueprint('firewall', __name__)
 
 class FirewallRule:
     def __init__(self, rule_id: str, direction: str, protocol: str, 
@@ -212,4 +216,173 @@ class FirewallManager:
         return [rule.to_dict() for rule in self.rules[cluster_id].values()]
 
     def get_rule(self, cluster_id: str, rule_id: str) -> Optional[FirewallRule]:
-        return self.rules.get(cluster_id, {}).get(rule_id) 
+        return self.rules.get(cluster_id, {}).get(rule_id)
+
+class FirewallError(Exception):
+    """Base exception for firewall-related errors"""
+    pass
+
+def get_firewall_metadata() -> Dict:
+    """Get firewall metadata from file"""
+    metadata_file = Path("firewall/rules.json")
+    if not metadata_file.exists():
+        return {"inbound": [], "outbound": []}
+    try:
+        return json.loads(metadata_file.read_text())
+    except json.JSONDecodeError:
+        return {"inbound": [], "outbound": []}
+
+def save_firewall_metadata(metadata: Dict) -> None:
+    """Save firewall metadata to file"""
+    metadata_file = Path("firewall/rules.json")
+    metadata_file.parent.mkdir(parents=True, exist_ok=True)
+    metadata_file.write_text(json.dumps(metadata, indent=2))
+
+def validate_ports(rule: Dict) -> None:
+    """Validate port configuration"""
+    if rule["protocol"] not in ["tcp", "udp", "icmp", "all"]:
+        raise FirewallError("Invalid protocol")
+
+    if rule["protocol"] in ["tcp", "udp"]:
+        if "from_port" not in rule or "to_port" not in rule:
+            raise FirewallError("From and To ports required for TCP/UDP")
+        try:
+            from_port = int(rule["from_port"])
+            to_port = int(rule["to_port"])
+            if not (0 <= from_port <= 65535 and 0 <= to_port <= 65535):
+                raise FirewallError("Ports must be between 0 and 65535")
+            if from_port > to_port:
+                raise FirewallError("From port cannot be greater than To port")
+        except ValueError:
+            raise FirewallError("Invalid port numbers")
+
+def validate_cidr(cidr: str) -> None:
+    """Validate CIDR format"""
+    try:
+        network = ipaddress.ip_network(cidr)
+        if network.prefixlen < 0 or network.prefixlen > 32:
+            raise FirewallError("Invalid CIDR prefix length")
+    except ValueError as e:
+        raise FirewallError(f"Invalid CIDR format: {str(e)}")
+
+@firewall.route('/rules', methods=['GET'])
+def list_rules():
+    """List all firewall rules"""
+    return jsonify(get_firewall_metadata())
+
+@firewall.route('/rules', methods=['POST'])
+def create_rule():
+    """Create a new firewall rule"""
+    try:
+        data = request.get_json()
+        if not data:
+            raise FirewallError("No data provided")
+
+        required = ["direction", "protocol", "source", "description"]
+        missing = [field for field in required if field not in data]
+        if missing:
+            raise FirewallError(f"Missing required fields: {', '.join(missing)}")
+
+        if data["direction"] not in ["inbound", "outbound"]:
+            raise FirewallError("Invalid direction")
+
+        # Validate rule
+        validate_ports(data)
+        validate_cidr(data["source"])
+
+        # Generate rule ID
+        metadata = get_firewall_metadata()
+        rule_id = str(len(metadata["inbound"]) + len(metadata["outbound"]) + 1)
+
+        # Create rule
+        rule = {
+            "id": rule_id,
+            "protocol": data["protocol"],
+            "source": data["source"],
+            "description": data["description"],
+            "created_at": datetime.now().isoformat()
+        }
+
+        # Add ports if applicable
+        if data["protocol"] in ["tcp", "udp"]:
+            rule["from_port"] = data["from_port"]
+            rule["to_port"] = data["to_port"]
+
+        metadata[data["direction"]].append(rule)
+        save_firewall_metadata(metadata)
+
+        return jsonify({
+            "message": "Firewall rule created",
+            "rule": rule
+        })
+
+    except FirewallError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
+@firewall.route('/rules/<id>', methods=['DELETE'])
+def delete_rule(id):
+    """Delete a firewall rule"""
+    try:
+        metadata = get_firewall_metadata()
+        
+        # Search in both inbound and outbound rules
+        for direction in ["inbound", "outbound"]:
+            for rule in metadata[direction]:
+                if rule["id"] == id:
+                    metadata[direction].remove(rule)
+                    save_firewall_metadata(metadata)
+                    return jsonify({"message": f"Rule {id} deleted"})
+
+        return jsonify({"error": "Rule not found"}), 404
+
+    except FirewallError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
+@firewall.route('/rules/batch', methods=['POST'])
+def batch_update_rules():
+    """Batch update firewall rules"""
+    try:
+        data = request.get_json()
+        if not data:
+            raise FirewallError("No data provided")
+
+        if "inbound" not in data and "outbound" not in data:
+            raise FirewallError("No rules provided")
+
+        # Validate all rules first
+        for direction in ["inbound", "outbound"]:
+            if direction in data:
+                for rule in data[direction]:
+                    validate_ports(rule)
+                    validate_cidr(rule["source"])
+
+        # Update rules
+        metadata = {"inbound": [], "outbound": []}
+        for direction in ["inbound", "outbound"]:
+            if direction in data:
+                for i, rule in enumerate(data[direction], 1):
+                    rule_id = str(i)
+                    metadata[direction].append({
+                        "id": rule_id,
+                        "protocol": rule["protocol"],
+                        "source": rule["source"],
+                        "description": rule.get("description", ""),
+                        "created_at": datetime.now().isoformat(),
+                        **({"from_port": rule["from_port"], "to_port": rule["to_port"]} 
+                           if rule["protocol"] in ["tcp", "udp"] else {})
+                    })
+
+        save_firewall_metadata(metadata)
+        return jsonify({
+            "message": "Firewall rules updated",
+            "rules": metadata
+        })
+
+    except FirewallError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500 

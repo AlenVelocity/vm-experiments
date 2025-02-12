@@ -87,15 +87,15 @@ class VMManager:
     def download_ubuntu_iso(self, force: bool = False) -> None:
         """Download Ubuntu cloud image"""
         img_file = self.vm_dir / "ubuntu-cloudimg-arm64.img"
-        
+
         if img_file.exists() and not force:
             return
-            
+
         url = "https://cloud-images.ubuntu.com/releases/jammy/release/ubuntu-22.04-server-cloudimg-arm64.img"
         try:
-            response = requests.get(url, stream=True)
-            response.raise_for_status()
-            
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+
             total = int(response.headers.get('content-length', 0))
             with img_file.open('wb') as f, tqdm(
                 desc="Downloading Ubuntu image",
@@ -160,10 +160,10 @@ class VMManager:
             
             # Convert and resize the image
             qcow2_file = self.vm_dir / "ubuntu-22.04-server-cloudimg-arm64.qcow2"
-            subprocess.run(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'qcow2',
+        subprocess.run(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'qcow2', 
                           str(image_path), str(qcow2_file)], check=True)
-            subprocess.run(['qemu-img', 'resize', str(qcow2_file), '20G'], check=True)
-            
+        subprocess.run(['qemu-img', 'resize', str(qcow2_file), '20G'], check=True)
+
             return qcow2_file
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to prepare cloud image: {e}")
@@ -240,7 +240,7 @@ runcmd:
   - echo 1 > /proc/sys/net/ipv4/ip_forward
 """
         (cloud_init_dir / "user-data").write_text(user_data)
-
+        
         try:
             # Create cloud-init ISO
             subprocess.run([
@@ -262,21 +262,21 @@ runcmd:
             
         if not self.vpc_manager.get_vpc(vpc_name):
             raise VMError(f"VPC {vpc_name} does not exist")
-            
+
         # Check if VM already exists
         if vm_name in self._metadata:
             raise VMError(f"VM {vm_name} already exists")
 
         try:
-            # Create VM-specific snapshot
+        # Create VM-specific snapshot
             img_file = self.vm_dir / "ubuntu-cloudimg-arm64.img"
-            qcow2_file = self.vm_dir / f"{vm_name}.qcow2"
+        qcow2_file = self.vm_dir / f"{vm_name}.qcow2"
             
             if not img_file.exists():
                 raise VMError("Base Ubuntu image not found. Run setup with --force to download it.")
                 
             # Create VM disk
-            subprocess.run(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'qcow2', 
+        subprocess.run(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'qcow2', 
                         str(img_file), str(qcow2_file)], check=True, capture_output=True)
             subprocess.run(['qemu-img', 'resize', str(qcow2_file), '20G'], check=True, capture_output=True)
 
@@ -289,7 +289,7 @@ runcmd:
             self._save_metadata()
 
             # Create cloud-init config
-            self.create_cloud_init_config(vm_name, vpc_name)
+        self.create_cloud_init_config(vm_name, vpc_name)
 
             self.log(f"VM {vm_name} created successfully in VPC {vpc_name}")
             
@@ -414,10 +414,10 @@ runcmd:
             
         try:
             # Find the QEMU process
-            result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
-            for line in result.stdout.splitlines():
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        for line in result.stdout.splitlines():
                 if f'-name {name}' in line:
-                    pid = line.split()[1]
+                pid = line.split()[1]
                     signal = 9 if force else 15  # SIGKILL if force, else SIGTERM
                     subprocess.run(['kill', f'-{signal}', pid], check=True)
                     
@@ -470,11 +470,11 @@ def main():
     parser.add_argument("name", nargs="?", help="VM name")
     parser.add_argument("--vpc", help="VPC name for create command")
     parser.add_argument("--force", action="store_true", help="Force operation")
-    
+
     args = parser.parse_args()
-    
+
     vm_manager = VMManager()
-    
+
     try:
         if args.command == "setup":
             vm_manager.setup()
