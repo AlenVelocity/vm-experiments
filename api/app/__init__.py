@@ -5,6 +5,7 @@ from .vms import vms
 from .networks import networks
 from .firewall import firewall
 from .templates import templates
+from .hosts import hosts
 from datetime import datetime
 
 def create_app():
@@ -17,6 +18,7 @@ def create_app():
     app.register_blueprint(networks, url_prefix='/networks')
     app.register_blueprint(firewall, url_prefix='/firewall')
     app.register_blueprint(templates, url_prefix='/templates')
+    app.register_blueprint(hosts, url_prefix='/hosts')
     
     @app.route('/health')
     def health_check():

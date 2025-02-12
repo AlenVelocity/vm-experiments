@@ -6,6 +6,7 @@ import subprocess
 import shutil
 import os
 from typing import Dict, Optional
+from .hosts import execute_remote_command, get_hosts_metadata, HostError
 
 vms = Blueprint('vms', __name__)
 
@@ -29,18 +30,33 @@ def save_vms_metadata(metadata: Dict) -> None:
     metadata_file.parent.mkdir(parents=True, exist_ok=True)
     metadata_file.write_text(json.dumps(metadata, indent=2))
 
-def get_vm_status(vm_id: str) -> Optional[str]:
+def get_vm_status(vm_id: str, host: Optional[Dict] = None) -> Optional[str]:
     """Get current status of a VM"""
     try:
-        result = subprocess.run(
-            ["virsh", "domstate", vm_id],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError:
+        command = f"virsh domstate {vm_id}"
+        if host:
+            result = execute_remote_command(host, command)
+            return result.strip()
+        else:
+            result = subprocess.run(
+                ["virsh", "domstate", vm_id],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            return result.stdout.strip()
+    except (subprocess.CalledProcessError, HostError):
         return None
+
+def get_host_for_vm(vm_id: str) -> Optional[Dict]:
+    """Get the host metadata for a VM"""
+    metadata = get_vms_metadata()
+    if vm_id not in metadata or "host" not in metadata[vm_id]:
+        return None
+        
+    hosts_metadata = get_hosts_metadata()
+    host_id = metadata[vm_id]["host"]
+    return hosts_metadata.get(host_id)
 
 @vms.route('/', methods=['GET'])
 def list_vms():
@@ -50,7 +66,8 @@ def list_vms():
         
         # Update status for each VM
         for vm_id in metadata:
-            current_status = get_vm_status(vm_id)
+            host = get_host_for_vm(vm_id)
+            current_status = get_vm_status(vm_id, host)
             if current_status:
                 metadata[vm_id]["status"] = current_status
         
@@ -75,6 +92,15 @@ def create_vm():
         if data["name"] in metadata:
             raise VMError(f"VM {data['name']} already exists")
 
+        # Get host information
+        host_id = data.get("host")
+        host = None
+        if host_id:
+            hosts_metadata = get_hosts_metadata()
+            if host_id not in hosts_metadata:
+                raise VMError(f"Host {host_id} not found")
+            host = hosts_metadata[host_id]
+
         # Initialize VM metadata
         metadata[data["name"]] = {
             "network": data["network"],
@@ -82,7 +108,8 @@ def create_vm():
             "memory": data["memory"],
             "disk": data["disk"],
             "status": "creating",
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "host": host_id
         }
 
         # Add optional cloud-init config if provided
@@ -106,7 +133,8 @@ def get_vm(vm_id):
             return jsonify({"error": "VM not found"}), 404
             
         # Update current status
-        current_status = get_vm_status(vm_id)
+        host = get_host_for_vm(vm_id)
+        current_status = get_vm_status(vm_id, host)
         if current_status:
             metadata[vm_id]["status"] = current_status
             
@@ -122,15 +150,19 @@ def start_vm(vm_id):
         if vm_id not in metadata:
             return jsonify({"error": "VM not found"}), 404
             
-        current_status = get_vm_status(vm_id)
+        host = get_host_for_vm(vm_id)
+        current_status = get_vm_status(vm_id, host)
         if current_status == "running":
             return jsonify({"error": "VM is already running"}), 400
             
         # Start the VM
-        subprocess.run(
-            ["virsh", "start", vm_id],
-            check=True
-        )
+        if host:
+            execute_remote_command(host, f"virsh start {vm_id}")
+        else:
+            subprocess.run(
+                ["virsh", "start", vm_id],
+                check=True
+            )
         
         # Update metadata
         metadata[vm_id]["status"] = "running"
@@ -141,8 +173,8 @@ def start_vm(vm_id):
             "message": f"VM {vm_id} started successfully",
             "status": "running"
         })
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Failed to start VM: {e.stderr}"}), 500
+    except (subprocess.CalledProcessError, HostError) as e:
+        return jsonify({"error": f"Failed to start VM: {str(e)}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -154,15 +186,19 @@ def stop_vm(vm_id):
         if vm_id not in metadata:
             return jsonify({"error": "VM not found"}), 404
             
-        current_status = get_vm_status(vm_id)
+        host = get_host_for_vm(vm_id)
+        current_status = get_vm_status(vm_id, host)
         if current_status != "running":
             return jsonify({"error": "VM is not running"}), 400
             
         # Stop the VM
-        subprocess.run(
-            ["virsh", "shutdown", vm_id],
-            check=True
-        )
+        if host:
+            execute_remote_command(host, f"virsh shutdown {vm_id}")
+        else:
+            subprocess.run(
+                ["virsh", "shutdown", vm_id],
+                check=True
+            )
         
         # Update metadata
         metadata[vm_id]["status"] = "shutting down"
@@ -173,8 +209,8 @@ def stop_vm(vm_id):
             "message": f"VM {vm_id} is shutting down",
             "status": "shutting down"
         })
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Failed to stop VM: {e.stderr}"}), 500
+    except (subprocess.CalledProcessError, HostError) as e:
+        return jsonify({"error": f"Failed to stop VM: {str(e)}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -186,15 +222,19 @@ def force_stop_vm(vm_id):
         if vm_id not in metadata:
             return jsonify({"error": "VM not found"}), 404
             
-        current_status = get_vm_status(vm_id)
+        host = get_host_for_vm(vm_id)
+        current_status = get_vm_status(vm_id, host)
         if current_status != "running":
             return jsonify({"error": "VM is not running"}), 400
             
         # Force stop the VM
-        subprocess.run(
-            ["virsh", "destroy", vm_id],
-            check=True
-        )
+        if host:
+            execute_remote_command(host, f"virsh destroy {vm_id}")
+        else:
+            subprocess.run(
+                ["virsh", "destroy", vm_id],
+                check=True
+            )
         
         # Update metadata
         metadata[vm_id]["status"] = "stopped"
@@ -205,8 +245,8 @@ def force_stop_vm(vm_id):
             "message": f"VM {vm_id} force stopped",
             "status": "stopped"
         })
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Failed to force stop VM: {e.stderr}"}), 500
+    except (subprocess.CalledProcessError, HostError) as e:
+        return jsonify({"error": f"Failed to force stop VM: {str(e)}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -218,15 +258,19 @@ def delete_vm(vm_id):
         if vm_id not in metadata:
             return jsonify({"error": "VM not found"}), 404
             
-        current_status = get_vm_status(vm_id)
+        host = get_host_for_vm(vm_id)
+        current_status = get_vm_status(vm_id, host)
         if current_status == "running":
             return jsonify({"error": "Cannot delete running VM"}), 400
             
         # Delete the VM
-        subprocess.run(
-            ["virsh", "undefine", vm_id, "--remove-all-storage"],
-            check=True
-        )
+        if host:
+            execute_remote_command(host, f"virsh undefine {vm_id} --remove-all-storage")
+        else:
+            subprocess.run(
+                ["virsh", "undefine", vm_id, "--remove-all-storage"],
+                check=True
+            )
         
         # Remove from metadata
         del metadata[vm_id]
@@ -235,8 +279,8 @@ def delete_vm(vm_id):
         return jsonify({
             "message": f"VM {vm_id} deleted successfully"
         })
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Failed to delete VM: {e.stderr}"}), 500
+    except (subprocess.CalledProcessError, HostError) as e:
+        return jsonify({"error": f"Failed to delete VM: {str(e)}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -248,26 +292,15 @@ def get_console_url(vm_id):
         if vm_id not in metadata:
             return jsonify({"error": "VM not found"}), 404
             
-        current_status = get_vm_status(vm_id)
-        if current_status != "running":
-            return jsonify({"error": "VM is not running"}), 400
+        host = get_host_for_vm(vm_id)
+        if host:
+            # For remote hosts, we need to set up VNC forwarding
+            # This is a placeholder - implement proper VNC forwarding
+            return jsonify({"error": "Console access for remote VMs not implemented yet"}), 501
             
-        # Get VNC port
-        result = subprocess.run(
-            ["virsh", "vncdisplay", vm_id],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        vnc_port = result.stdout.strip()
-        
-        # Construct console URL (assuming noVNC is set up)
-        console_url = f"/novnc/vnc.html?host={os.uname().nodename}&port={5900 + int(vnc_port[1:])}"
-        
+        # For local VMs, return the console URL
         return jsonify({
-            "console_url": console_url
+            "console_url": f"vnc://localhost:{vm_id}"  # Implement proper URL generation
         })
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Failed to get console URL: {e.stderr}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500 
