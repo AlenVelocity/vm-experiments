@@ -35,18 +35,47 @@ def get_vm_status(vm_id: str, host: Optional[Dict] = None) -> Optional[str]:
     try:
         command = f"virsh domstate {vm_id}"
         if host:
-            result = execute_remote_command(host, command)
+            result = execute_remote_command(host, command, timeout=5)
             return result.strip()
         else:
             result = subprocess.run(
                 ["virsh", "domstate", vm_id],
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
+                timeout=5
             )
             return result.stdout.strip()
-    except (subprocess.CalledProcessError, HostError):
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    except (subprocess.CalledProcessError, HostError) as e:
+        return "error"
+    except Exception as e:
         return None
+
+def execute_vm_command(vm_id: str, command: str, host: Optional[Dict] = None, timeout: int = 5) -> str:
+    """Execute a virsh command with timeout"""
+    try:
+        if host:
+            result = execute_remote_command(host, f"virsh {command} {vm_id}", timeout=timeout)
+        else:
+            result = subprocess.run(
+                ["virsh", command, vm_id],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=timeout
+            )
+            result = result.stdout
+        return result.strip()
+    except subprocess.TimeoutExpired:
+        raise VMError(f"Command timed out after {timeout} seconds")
+    except subprocess.CalledProcessError as e:
+        raise VMError(f"Command failed: {e.stderr.strip()}")
+    except HostError as e:
+        raise VMError(f"Host error: {str(e)}")
+    except Exception as e:
+        raise VMError(f"Unexpected error: {str(e)}")
 
 def get_host_for_vm(vm_id: str) -> Optional[Dict]:
     """Get the host metadata for a VM"""
@@ -149,34 +178,26 @@ def start_vm(vm_id):
         metadata = get_vms_metadata()
         if vm_id not in metadata:
             return jsonify({"error": "VM not found"}), 404
-            
+
         host = get_host_for_vm(vm_id)
         current_status = get_vm_status(vm_id, host)
-        if current_status == "running":
-            return jsonify({"error": "VM is already running"}), 400
-            
-        # Start the VM
-        if host:
-            execute_remote_command(host, f"virsh start {vm_id}")
-        else:
-            subprocess.run(
-                ["virsh", "start", vm_id],
-                check=True
-            )
         
-        # Update metadata
-        metadata[vm_id]["status"] = "running"
-        metadata[vm_id]["started_at"] = datetime.now().isoformat()
+        if current_status == "running":
+            return jsonify({"message": "VM is already running"}), 200
+            
+        result = execute_vm_command(vm_id, "start", host)
+        metadata[vm_id]["last_status"] = "running"
+        metadata[vm_id]["last_updated"] = datetime.now().isoformat()
         save_vms_metadata(metadata)
         
         return jsonify({
-            "message": f"VM {vm_id} started successfully",
+            "message": "VM started successfully",
             "status": "running"
         })
-    except (subprocess.CalledProcessError, HostError) as e:
-        return jsonify({"error": f"Failed to start VM: {str(e)}"}), 500
+    except VMError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 @vms.route('/<vm_id>/stop', methods=['POST'])
 def stop_vm(vm_id):

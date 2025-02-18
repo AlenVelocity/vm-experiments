@@ -95,54 +95,62 @@ def get_network(id):
 
 @networks.route('/<id>/ips', methods=['POST'])
 def allocate_ip(id):
-    """Allocate IP from network"""
+    """Allocate an IP from the network"""
+    metadata = get_networks_metadata()
+    if id not in metadata:
+        return jsonify({"error": "Network not found"}), 404
+
+    network_data = metadata[id]
+    # Initialize used_ips if not present
+    network_data['used_ips'] = network_data.get('used_ips', [])
+
     try:
-        metadata = get_networks_metadata()
-        if id not in metadata:
-            raise NetworkError("Network not found")
+        network = ipaddress.ip_network(network_data['cidr'])
+        # Skip network address, broadcast address and gateway
+        available_ips = [str(ip) for ip in network.hosts()][1:]
+        # Filter out already used IPs
+        available_ips = [ip for ip in available_ips if ip not in network_data['used_ips']]
+        
+        if not available_ips:
+            return jsonify({"error": "No available IPs"}), 409
 
-        network = metadata[id]
-        ip_network = ipaddress.ip_network(network["cidr"])
-        used_ips = set(network["used_ips"])
-
-        # Find next available IP
-        for ip in ip_network.hosts():
-            ip_str = str(ip)
-            if ip_str not in used_ips:
-                network["used_ips"].append(ip_str)
-                save_networks_metadata(metadata)
-                return jsonify({
-                    "ip": ip_str,
-                    "allocated_at": datetime.now().isoformat()
-                })
-
-        raise NetworkError("No available IPs in network")
-
-    except NetworkError as e:
-        return jsonify({"error": str(e)}), 400
+        # Atomic operation: get and update in one go
+        allocated_ip = available_ips[0]
+        network_data['used_ips'].append(allocated_ip)
+        network_data['last_updated'] = datetime.now().isoformat()
+        
+        # Save immediately to prevent race conditions
+        save_networks_metadata(metadata)
+        
+        return jsonify({
+            "ip": allocated_ip,
+            "network_id": id,
+            "cidr": network_data['cidr']
+        })
     except Exception as e:
-        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @networks.route('/<id>/ips/<ip>', methods=['DELETE'])
 def release_ip(id, ip):
-    """Release IP back to network"""
+    """Release an allocated IP"""
+    metadata = get_networks_metadata()
+    if id not in metadata:
+        return jsonify({"error": "Network not found"}), 404
+
+    network_data = metadata[id]
+    # Initialize used_ips if not present
+    network_data['used_ips'] = network_data.get('used_ips', [])
+
+    if ip not in network_data['used_ips']:
+        return jsonify({"error": "IP not allocated"}), 404
+
     try:
-        metadata = get_networks_metadata()
-        if id not in metadata:
-            raise NetworkError("Network not found")
-
-        network = metadata[id]
-        if ip not in network["used_ips"]:
-            raise NetworkError("IP not allocated from this network")
-
-        network["used_ips"].remove(ip)
+        network_data['used_ips'].remove(ip)
+        network_data['last_updated'] = datetime.now().isoformat()
         save_networks_metadata(metadata)
-        return jsonify({"message": f"IP {ip} released"})
-
-    except NetworkError as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"message": "IP released successfully"})
     except Exception as e:
-        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @networks.route('/<id>', methods=['DELETE'])
 def delete_network(id):
