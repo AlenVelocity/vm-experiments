@@ -12,6 +12,7 @@ import functools
 from flask_compress import Compress
 from marshmallow import Schema, fields, validate, ValidationError
 import platform
+import random
 
 app = Flask(__name__)
 CORS(app)
@@ -24,31 +25,25 @@ from app.vpc import VPCManager, VPCError
 from app.networking import NetworkManager, NetworkError
 from app.migration import MigrationManager, MigrationConfig, MigrationError
 from app.db import db
+from app.libvirt_utils import get_libvirt_connection
+from app.ip_manager import IPManager
 
 # Initialize libvirt connection
-def get_libvirt_connection():
-    try:
-        conn = libvirt.open('qemu:///system')
-        if conn is None:
-            raise Exception('Failed to connect to QEMU/KVM')
-        return conn
-    except libvirt.libvirtError as e:
-        logger.error(f"Failed to connect to libvirt: {e}")
-        raise Exception(f"Failed to connect to libvirt: {e}")
-
 def init_managers():
-    global network_manager, vpc_manager, vm_manager, migration_manager
+    global network_manager, vpc_manager, vm_manager, migration_manager, ip_manager
     conn = get_libvirt_connection()
     network_manager = NetworkManager(conn)
     vpc_manager = VPCManager(network_manager)
-    vm_manager = VMManager(network_manager=network_manager)
+    ip_manager = IPManager()
+    vm_manager = VMManager(network_manager=network_manager, ip_manager=ip_manager)
     migration_manager = MigrationManager(conn)
 
 try:
     init_managers()
 except Exception as e:
     logger.error(f"Failed to initialize managers: {e}")
-    
+    raise
+
 # Add error handler for libvirt errors
 @app.errorhandler(libvirt.libvirtError)
 def handle_libvirt_error(error):
@@ -160,8 +155,13 @@ class VMCreateSchema(Schema):
     arch = fields.Str(validate=validate.OneOf(['x86_64', 'aarch64']), allow_none=True)
 
 class VPCCreateSchema(Schema):
-    name = fields.Str(required=True, validate=validate.Regexp(r'^[a-zA-Z0-9-]+$'))
-    cidr = fields.Str(validate=validate.Regexp(r'^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'))
+    name = fields.Str(required=True, validate=[
+        validate.Length(min=1, max=64),
+        validate.Regexp(r'^[a-zA-Z0-9-]+$', error='VPC name can only contain letters, numbers, and hyphens')
+    ])
+    cidr = fields.Str(validate=[
+        validate.Regexp(r'^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$', error='Invalid CIDR format')
+    ])
 
 class SubnetCreateSchema(Schema):
     name = fields.Str(required=True, validate=validate.Regexp(r'^[a-zA-Z0-9-]+$'))
@@ -188,11 +188,26 @@ def validate_request(schema_class):
             try:
                 data = request.get_json()
                 if not data:
-                    return jsonify({'error': 'No JSON data provided'}), 400
+                    return jsonify({'error': 'No JSON data provided', 'details': 'Request body is empty or not valid JSON'}), 400
                 validated_data = schema.load(data)
                 return f(*args, **kwargs)
             except ValidationError as err:
-                return jsonify({'error': 'Validation error', 'details': err.messages}), 400
+                error_messages = []
+                for field, messages in err.messages.items():
+                    if isinstance(messages, list):
+                        error_messages.extend([f"{field}: {msg}" for msg in messages])
+                    else:
+                        error_messages.append(f"{field}: {messages}")
+                return jsonify({
+                    'error': 'Validation error',
+                    'details': error_messages,
+                    'schema': schema_class.__name__
+                }), 400
+            except json.JSONDecodeError as e:
+                return jsonify({
+                    'error': 'Invalid JSON',
+                    'details': str(e)
+                }), 400
         return wrapper
     return decorator
 
@@ -340,18 +355,62 @@ def list_vpcs():
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+def is_private_cidr(cidr: str) -> bool:
+    """Check if a CIDR block is within private network ranges."""
+    try:
+        network = ipaddress.ip_network(cidr)
+        return (
+            network.is_private and
+            network.prefixlen >= 16 and
+            network.prefixlen <= 28
+        )
+    except ValueError:
+        return False
+
+def generate_random_cidr() -> str:
+    """Generate a random private network CIDR."""
+    private_ranges = [
+        '10.0.0.0/8',
+        '172.16.0.0/12',
+        '192.168.0.0/16'
+    ]
+    base_network = ipaddress.ip_network(random.choice(private_ranges))
+    # Generate a random subnet within the base network
+    prefix_length = random.randint(16, 28)
+    subnets = list(base_network.subnets(new_prefix=prefix_length))
+    return str(random.choice(subnets))
+
 @app.route('/api/vpcs', methods=['POST'])
 @validate_request(VPCCreateSchema)
 def create_vpc():
     try:
         data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        # Validate required fields
+        if 'name' not in data:
+            return jsonify({'error': 'VPC name is required'}), 400
+
         name = data['name']
-        cidr = data.get('cidr', '192.168.0.0/16')
+        cidr = data.get('cidr')
         
+        # If no CIDR provided, generate a random one
+        if not cidr:
+            cidr = generate_random_cidr()
+        # If CIDR provided, validate it's a private network
+        elif not is_private_cidr(cidr):
+            return jsonify({
+                'error': 'Invalid CIDR range',
+                'details': 'CIDR must be a private network range with prefix length between /16 and /28'
+            }), 400
+
+        # Check for existing VPC
         existing_vpc = vpc_manager.get_vpc(name)
         if existing_vpc:
             return jsonify({'error': f'VPC {name} already exists'}), 400
-            
+
+        # Create VPC
         vpc = vpc_manager.create_vpc(name, cidr)
         return jsonify({'vpc': vpc.to_dict()}), 201
     except (VPCError, NetworkError) as e:

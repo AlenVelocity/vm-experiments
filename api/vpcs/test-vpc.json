@@ -1,0 +1,7 @@
+{
+  "name": "test-vpc",
+  "cidr": "192.168.100.0/24",
+  "subnets": {},
+  "used_private_ips": {},
+  "used_public_ips": {}
+}

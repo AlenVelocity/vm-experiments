@@ -115,7 +115,21 @@ class Database:
             )
             """)
 
+            # Create IP addresses table
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS ip_addresses (
+                ip TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                machine_id TEXT,
+                is_elastic BOOLEAN DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (machine_id) REFERENCES vms(id) ON DELETE SET NULL
+            )
+            """)
+
     def save_vm(self, vm_id: str, data: Dict[str, Any]) -> None:
+        """Create or update a VM in the database."""
         with self.get_connection() as conn:
             now = time.time()
             conn.execute("""
@@ -126,7 +140,14 @@ class Database:
             """, (
                 vm_id,
                 data['name'],
-                json.dumps(data['config']),
+                json.dumps({
+                    'cpu_cores': data['cpu_cores'],
+                    'memory_mb': data['memory_mb'],
+                    'disk_size_gb': data['disk_size_gb'],
+                    'network_name': data['network_name'],
+                    'cloud_init': data.get('cloud_init'),
+                    'image_id': data.get('image_id')
+                }),
                 json.dumps(data.get('network_info')),
                 data.get('ssh_port'),
                 data.get('status', 'creating'),
@@ -290,6 +311,88 @@ class Database:
         with self.get_connection() as conn:
             cutoff_time = time.time() - max_age_seconds
             conn.execute("DELETE FROM vm_metrics WHERE timestamp < ?", (cutoff_time,))
+
+    def list_ips(self) -> List[Dict]:
+        """List all IP addresses"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM ip_addresses")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_ip(self, ip: str) -> Optional[Dict]:
+        """Get IP address details"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM ip_addresses WHERE ip = ?", (ip,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def create_ip(self, ip: str, data: Dict) -> None:
+        """Create a new IP address entry"""
+        with self.get_connection() as conn:
+            now = time.time()
+            conn.execute("""
+            INSERT INTO ip_addresses (ip, state, machine_id, is_elastic, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                ip,
+                data['state'],
+                data.get('machine_id'),
+                data.get('is_elastic', False),
+                now,
+                now
+            ))
+
+    def update_ip(self, ip: str, data: Dict) -> None:
+        """Update an IP address entry"""
+        with self.get_connection() as conn:
+            now = time.time()
+            conn.execute("""
+            UPDATE ip_addresses
+            SET state = ?, machine_id = ?, is_elastic = ?, updated_at = ?
+            WHERE ip = ?
+            """, (
+                data['state'],
+                data.get('machine_id'),
+                data.get('is_elastic', False),
+                now,
+                ip
+            ))
+
+    def delete_ip(self, ip: str) -> None:
+        """Delete an IP address entry"""
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM ip_addresses WHERE ip = ?", (ip,))
+
+    def update_vm(self, vm_id: str, data: Dict[str, Any]) -> None:
+        """Update a VM's configuration in the database."""
+        with self.get_connection() as conn:
+            now = time.time()
+            conn.execute("""
+            UPDATE vms SET
+                name = ?,
+                config = ?,
+                network_info = ?,
+                ssh_port = ?,
+                status = ?,
+                updated_at = ?,
+                error_message = ?
+            WHERE id = ?
+            """, (
+                data['name'],
+                json.dumps({
+                    'cpu_cores': data['cpu_cores'],
+                    'memory_mb': data['memory_mb'],
+                    'disk_size_gb': data['disk_size_gb'],
+                    'network_name': data['network_name'],
+                    'cloud_init': data.get('cloud_init'),
+                    'image_id': data.get('image_id')
+                }),
+                json.dumps(data.get('network_info')),
+                data.get('ssh_port'),
+                data.get('status', 'creating'),
+                now,
+                data.get('error_message'),
+                vm_id
+            ))
 
 # Create a global database instance
 db = Database() 

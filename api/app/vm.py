@@ -26,6 +26,7 @@ import random
 import string
 import platform
 import threading
+from .libvirt_utils import get_libvirt_connection
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ class VM:
         self.metrics_history = [m for m in self.metrics_history if m.timestamp > cutoff_time]
 
 class LibvirtManager:
-    def __init__(self):
+    def __init__(self, ip_manager: Optional[IPManager] = None):
         self.conn = libvirt.open('qemu:///system')
         if not self.conn:
             raise Exception('Failed to open connection to qemu:///system')
@@ -111,7 +112,7 @@ class LibvirtManager:
             self._init_storage_pool()
             
             self.network_manager = NetworkManager(self.conn)
-            self.ip_manager = IPManager()
+            self.ip_manager = ip_manager or IPManager()
             self.disk_manager = DiskManager(self.conn)
             
             self.vms = self._load_vms()
@@ -435,7 +436,8 @@ ethernets:
             else:
                 base[key] = value
 
-    def _download_ubuntu_image(self, image_id: str) -> Path:
+    def _prepare_cloud_image(self, image_id: str) -> Path:
+        """Download and prepare cloud image for VM creation."""
         try:
             # Ensure image_id is properly formatted
             if not image_id.startswith('ubuntu-'):
@@ -454,7 +456,11 @@ ethernets:
             temp_path = cached_image.with_suffix('.tmp')
             
             # Download with progress tracking
-            response = requests.get(image_url, stream=True)
+            response = self.session.get(
+                image_url,
+                stream=True,
+                timeout=self.request_timeout
+            )
             response.raise_for_status()
             
             total_size = int(response.headers.get('content-length', 0))
@@ -483,6 +489,37 @@ ethernets:
             # Clean up temporary file if it exists
             if 'temp_path' in locals() and temp_path.exists():
                 temp_path.unlink()
+            raise
+
+    def _create_vm_disk(self, cloud_image: Path, vm_disk: Path, size_gb: int) -> None:
+        """Create and configure VM disk from cloud image."""
+        try:
+            # Create base disk from cloud image
+            subprocess.run([
+                'qemu-img', 'create',
+                '-f', 'qcow2',
+                '-F', 'qcow2',
+                '-b', str(cloud_image),
+                str(vm_disk)
+            ], check=True)
+
+            # Resize disk to specified size
+            subprocess.run([
+                'qemu-img', 'resize',
+                str(vm_disk),
+                f"{size_gb}G"
+            ], check=True)
+
+            logger.info(f"Created VM disk at {vm_disk} with size {size_gb}GB")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error creating VM disk: {e}")
+            if vm_disk.exists():
+                vm_disk.unlink()
+            raise VMError(f"Failed to create VM disk: {e}")
+        except Exception as e:
+            logger.error(f"Error creating VM disk: {e}")
+            if vm_disk.exists():
+                vm_disk.unlink()
             raise
 
     def _start_vm(self, vm: VM) -> None:
@@ -1028,107 +1065,79 @@ ethernets:
             raise VMError(f"Failed to get VM statistics: {e}")
 
 class VMManager:
-    def __init__(self, network_manager: NetworkManager):
-        self.network_manager = network_manager
+    def __init__(self, network_manager: NetworkManager, ip_manager: IPManager):
         self.conn = get_libvirt_connection()
-        
-    def _prepare_cloud_init_config(self, config: VMConfig) -> Optional[str]:
-        """Prepare cloud-init configuration if provided."""
-        if not config.cloud_init:
-            return None
+        if not self.conn:
+            raise VMError('Failed to open connection to qemu:///system')
             
         try:
-            # Generate cloud-init ISO file
-            import yaml
-            from tempfile import NamedTemporaryFile
-            import subprocess
+            self.vm_dir = Path("api/data/vms")
+            self.vm_dir.mkdir(parents=True, exist_ok=True)
             
-            # Create user-data file
-            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                yaml.dump({'#cloud-config': config.cloud_init}, f)
-                user_data_file = f.name
-                
-            # Create meta-data file (empty is fine for basic cloud-init)
-            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                yaml.dump({}, f)
-                meta_data_file = f.name
-                
-            # Generate ISO file
-            iso_file = f"/var/lib/libvirt/images/cloud-init-{config.name}.iso"
-            subprocess.run([
-                'genisoimage', '-output', iso_file,
-                '-volid', 'cidata',
-                '-joliet', '-rock',
-                user_data_file, meta_data_file
-            ], check=True)
+            self.network_manager = network_manager
+            self.ip_manager = ip_manager
+            self.libvirt_manager = LibvirtManager(ip_manager=self.ip_manager)
             
-            return iso_file
+            self.vms = self._load_vms()
+            
+            logger.info("VMManager initialized successfully")
             
         except Exception as e:
-            logger.error(f"Failed to prepare cloud-init config: {e}")
-            raise VMError(f"Failed to prepare cloud-init config: {e}")
-            
+            logger.error(f"Failed to initialize VMManager: {e}")
+            raise
+
+    def _load_vms(self) -> Dict[str, VM]:
+        vms = {}
+        stored_vms = db.list_vms()
+        for vm_data in stored_vms:
+            config = VMConfig(
+                name=vm_data['name'],
+                cpu_cores=vm_data['cpu_cores'],
+                memory_mb=vm_data['memory_mb'],
+                disk_size_gb=vm_data['disk_size_gb'],
+                network_name=vm_data['network_name'],
+                cloud_init=vm_data.get('cloud_init'),
+                image_id=vm_data.get('image_id')
+            )
+            vm = VM(
+                id=vm_data['id'],
+                name=vm_data['name'],
+                config=config,
+                network_info=vm_data.get('network_info'),
+                ssh_port=vm_data.get('ssh_port')
+            )
+            vms[vm.id] = vm
+        return vms
+
     def create_vm(self, config: VMConfig) -> VM:
-        try:
-            # Validate architecture compatibility
-            if config.arch:
-                current_arch = platform.machine().lower()
-                if 'arm' in current_arch or 'aarch64' in current_arch:
-                    if config.arch.lower() not in ['arm64', 'aarch64']:
-                        raise VMError(f"Architecture {config.arch} not supported on this ARM platform")
-                elif config.arch.lower() not in ['x86_64', 'amd64']:
-                    raise VMError(f"Architecture {config.arch} not supported on this x86 platform")
-            
-            # Prepare cloud-init config if provided
-            cloud_init_iso = self._prepare_cloud_init_config(config)
-            
-            # Create VM with existing logic...
-            
-            # Attach cloud-init ISO if created
-            if cloud_init_iso:
-                self._attach_cloud_init_iso(vm_name, cloud_init_iso)
-            
-            return vm
-            
-        except Exception as e:
-            logger.error(f"Failed to create VM: {e}")
-            # Cleanup any created resources
-            self._cleanup_failed_vm(config.name)
-            raise VMError(f"Failed to create VM: {e}")
-            
-    def _attach_cloud_init_iso(self, vm_name: str, iso_path: str):
-        """Attach cloud-init ISO to the VM."""
-        try:
-            domain = self.conn.lookupByName(vm_name)
-            
-            # Generate disk XML
-            disk_xml = f"""
-            <disk type='file' device='cdrom'>
-                <driver name='qemu' type='raw'/>
-                <source file='{iso_path}'/>
-                <target dev='hdc' bus='ide'/>
-                <readonly/>
-            </disk>
-            """
-            
-            domain.attachDevice(disk_xml)
-            
-        except Exception as e:
-            logger.error(f"Failed to attach cloud-init ISO: {e}")
-            raise VMError(f"Failed to attach cloud-init ISO: {e}")
-            
-    def _cleanup_failed_vm(self, vm_name: str):
-        """Cleanup resources after failed VM creation."""
-        try:
-            # Remove cloud-init ISO if it exists
-            iso_path = f"/var/lib/libvirt/images/cloud-init-{vm_name}.iso"
-            if os.path.exists(iso_path):
-                os.remove(iso_path)
-                
-            # Existing cleanup logic...
-            
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+        return self.libvirt_manager.create_vm(config)
+    
+    def get_vm(self, vm_id: str) -> Optional[VM]:
+        return self.libvirt_manager.get_vm(vm_id)
+    
+    def delete_vm(self, vm_id: str) -> None:
+        return self.libvirt_manager.delete_vm(vm_id)
+    
+    def list_vms(self) -> List[VM]:
+        return self.libvirt_manager.list_vms()
+    
+    def get_vm_status(self, vm_id: str) -> str:
+        return self.libvirt_manager.get_vm_status(vm_id)
+    
+    def get_metrics(self, vm: VM) -> Dict[str, Any]:
+        return self.libvirt_manager.get_metrics(vm)
+    
+    def list_disks(self) -> List[Dict]:
+        return self.libvirt_manager.list_disks()
+    
+    def create_disk(self, name: str, size_gb: int) -> Dict:
+        return self.libvirt_manager.create_disk(name, size_gb)
+    
+    def resize_cpu(self, vm: VM, cpu_cores: int) -> None:
+        return self.libvirt_manager.resize_cpu(vm, cpu_cores)
+    
+    def resize_memory(self, vm: VM, memory_mb: int) -> None:
+        return self.libvirt_manager.resize_memory(vm, memory_mb)
 
 class VMConsole:
     def __init__(self, vm: VM, libvirt_manager: LibvirtManager):

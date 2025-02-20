@@ -12,8 +12,9 @@ fi
 # Activate virtual environment
 source venv/bin/activate
 
-# Install/upgrade pip
-python -m pip install --upgrade pip
+# Upgrade pip
+echo "Upgrading pip..."
+pip install --upgrade pip
 
 # Install requirements
 echo "Installing requirements..."
@@ -21,7 +22,7 @@ pip install -r requirements.txt
 
 # Set environment variables
 export FLASK_APP=app.api
-export FLASK_ENV=production
+export FLASK_ENV=development
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 # Check if libvirt is installed
@@ -35,6 +36,6 @@ mkdir -p data/vms
 mkdir -p data/disks
 mkdir -p data/networks
 
-# Run the Flask application
+# Start API server
 echo "Starting API server..."
 python -m flask run --host=0.0.0.0 --port=5000 
