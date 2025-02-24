@@ -642,5 +642,18 @@ create_vm = invalidate_cache(create_vm)
 create_vpc = invalidate_cache(create_vpc)
 start_migration = invalidate_cache(start_migration)
 
+# Add IP pool metrics endpoint
+@app.route('/api/ip-pool/metrics', methods=['GET'])
+@cache.cached(timeout=30, key_prefix=cache_key_prefix)
+def get_ip_pool_metrics():
+    """Get metrics about the IP pool."""
+    try:
+        metrics = ip_manager.get_pool_metrics()
+        return jsonify({'metrics': metrics})
+    except Exception as e:
+        logger.error(f"Error getting IP pool metrics: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True) 

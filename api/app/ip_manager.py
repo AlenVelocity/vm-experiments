@@ -97,6 +97,9 @@ class IPManager:
     def __init__(self):
         self.ip_range = ipaddress.IPv4Network('10.0.0.0/24')
         self.dhcp_servers: Dict[str, DHCPServer] = {}
+        self.scaling_threshold = 0.8  # Scale when 80% full
+        self.max_pool_size = 24  # Maximum pool size /24
+        self.min_pool_size = 28  # Minimum pool size /28
         self._ensure_ip_pool()
         try:
             self._setup_networking()
@@ -271,8 +274,31 @@ class IPManager:
         """List all IPs"""
         return db.list_ips()
 
+    def _check_pool_utilization(self) -> None:
+        """Check IP pool utilization and scale if needed."""
+        ips = self.list_ips()
+        total_ips = len(ips)
+        used_ips = len([ip for ip in ips if ip['state'] != 'available'])
+        utilization = used_ips / total_ips if total_ips > 0 else 0
+
+        if utilization >= self.scaling_threshold:
+            current_prefix = self.ip_range.prefixlen
+            if current_prefix > self.max_pool_size:
+                # Calculate new range with one bit less prefix (doubles the size)
+                new_prefix = current_prefix - 1
+                new_range = ipaddress.IPv4Network(f"{self.ip_range.network_address}/{new_prefix}")
+                
+                # Add new IPs to the pool
+                for ip in new_range.hosts():
+                    if str(ip) not in [existing['ip'] for existing in ips]:
+                        self.add_ip(str(ip))
+                
+                self.ip_range = new_range
+                logger.info(f"IP pool expanded from /{current_prefix} to /{new_prefix}")
+
     def get_available_ip(self) -> Optional[str]:
-        """Get an available IP"""
+        """Get an available IP and check if pool needs scaling."""
+        self._check_pool_utilization()  # Check before getting IP
         ips = db.list_ips()
         available = [ip for ip in ips if ip.get('state') == 'available']
         return random.choice(available)['ip'] if available else None
@@ -303,4 +329,46 @@ class IPManager:
             'state': 'available',
             'machine_id': None,
             'is_elastic': False
-        }) 
+        })
+
+    def get_pool_metrics(self) -> Dict:
+        """Get metrics about the IP pool."""
+        ips = self.list_ips()
+        total_ips = len(ips)
+        
+        # Count IPs in each state
+        state_counts = {
+            'available': 0,
+            'allocated': 0,
+            'attached': 0,
+            'detached': 0
+        }
+        
+        elastic_count = 0
+        attached_vms = set()
+        
+        for ip in ips:
+            state = ip.get('state', 'unknown')
+            state_counts[state] = state_counts.get(state, 0) + 1
+            
+            if ip.get('is_elastic'):
+                elastic_count += 1
+            
+            if ip.get('machine_id'):
+                attached_vms.add(ip['machine_id'])
+        
+        utilization = (total_ips - state_counts['available']) / total_ips if total_ips > 0 else 0
+        
+        return {
+            'total_ips': total_ips,
+            'available_ips': state_counts['available'],
+            'allocated_ips': state_counts['allocated'],
+            'attached_ips': state_counts['attached'],
+            'detached_ips': state_counts['detached'],
+            'elastic_ips': elastic_count,
+            'utilization_percentage': round(utilization * 100, 2),
+            'unique_vms': len(attached_vms),
+            'pool_size': f"/{self.ip_range.prefixlen}",
+            'can_scale': self.ip_range.prefixlen > self.max_pool_size,
+            'scaling_threshold_percentage': round(self.scaling_threshold * 100, 2)
+        } 
