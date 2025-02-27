@@ -5,7 +5,8 @@ from datetime import datetime
 import subprocess
 import shutil
 import os
-from typing import Dict, Optional
+import contextlib
+from typing import Dict, Optional, Generator
 from .hosts import execute_remote_command, get_hosts_metadata, HostError
 
 vms = Blueprint('vms', __name__)
@@ -13,6 +14,26 @@ vms = Blueprint('vms', __name__)
 class VMError(Exception):
     """Base exception for VM-related errors"""
     pass
+
+@contextlib.contextmanager
+def managed_subprocess(cmd: list, **kwargs) -> Generator[subprocess.Popen, None, None]:
+    """Context manager for subprocess to ensure proper cleanup"""
+    process = None
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **kwargs
+        )
+        yield process
+    finally:
+        if process:
+            try:
+                process.kill()  # Ensure process is terminated
+                process.wait(timeout=5)  # Wait for process to terminate
+            except Exception:
+                pass  # Best effort cleanup
 
 def get_vms_metadata() -> Dict:
     """Get metadata for all VMs"""
@@ -28,7 +49,16 @@ def save_vms_metadata(metadata: Dict) -> None:
     """Save VM metadata"""
     metadata_file = Path("data/vms/metadata.json")
     metadata_file.parent.mkdir(parents=True, exist_ok=True)
-    metadata_file.write_text(json.dumps(metadata, indent=2))
+    temp_file = metadata_file.with_suffix('.tmp')
+    try:
+        # Write to temporary file first
+        temp_file.write_text(json.dumps(metadata, indent=2))
+        # Atomic rename
+        temp_file.replace(metadata_file)
+    finally:
+        # Cleanup temp file if it still exists
+        if temp_file.exists():
+            temp_file.unlink()
 
 def get_vm_status(vm_id: str, host: Optional[Dict] = None) -> Optional[str]:
     """Get current status of a VM"""
@@ -38,18 +68,14 @@ def get_vm_status(vm_id: str, host: Optional[Dict] = None) -> Optional[str]:
             result = execute_remote_command(host, command, timeout=5)
             return result.strip()
         else:
-            result = subprocess.run(
-                ["virsh", "domstate", vm_id],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=5
-            )
-            return result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        return "timeout"
-    except (subprocess.CalledProcessError, HostError) as e:
-        return "error"
+            with managed_subprocess(["virsh", "domstate", vm_id], text=True) as process:
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                    if process.returncode == 0:
+                        return stdout.strip()
+                    return "error"
+                except subprocess.TimeoutExpired:
+                    return "timeout"
     except Exception as e:
         return None
 
@@ -58,22 +84,16 @@ def execute_vm_command(vm_id: str, command: str, host: Optional[Dict] = None, ti
     try:
         if host:
             result = execute_remote_command(host, f"virsh {command} {vm_id}", timeout=timeout)
+            return result.strip()
         else:
-            result = subprocess.run(
-                ["virsh", command, vm_id],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=timeout
-            )
-            result = result.stdout
-        return result.strip()
-    except subprocess.TimeoutExpired:
-        raise VMError(f"Command timed out after {timeout} seconds")
-    except subprocess.CalledProcessError as e:
-        raise VMError(f"Command failed: {e.stderr.strip()}")
-    except HostError as e:
-        raise VMError(f"Host error: {str(e)}")
+            with managed_subprocess(["virsh", command, vm_id], text=True) as process:
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                    if process.returncode != 0:
+                        raise VMError(f"Command failed: {stderr.strip()}")
+                    return stdout.strip()
+                except subprocess.TimeoutExpired:
+                    raise VMError(f"Command timed out after {timeout} seconds")
     except Exception as e:
         raise VMError(f"Unexpected error: {str(e)}")
 
@@ -213,13 +233,7 @@ def stop_vm(vm_id):
             return jsonify({"error": "VM is not running"}), 400
             
         # Stop the VM
-        if host:
-            execute_remote_command(host, f"virsh shutdown {vm_id}")
-        else:
-            subprocess.run(
-                ["virsh", "shutdown", vm_id],
-                check=True
-            )
+        result = execute_vm_command(vm_id, "shutdown", host)
         
         # Update metadata
         metadata[vm_id]["status"] = "shutting down"
@@ -230,10 +244,10 @@ def stop_vm(vm_id):
             "message": f"VM {vm_id} is shutting down",
             "status": "shutting down"
         })
-    except (subprocess.CalledProcessError, HostError) as e:
-        return jsonify({"error": f"Failed to stop VM: {str(e)}"}), 500
+    except VMError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 @vms.route('/<vm_id>/force-stop', methods=['POST'])
 def force_stop_vm(vm_id):
