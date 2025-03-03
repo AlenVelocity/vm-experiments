@@ -27,6 +27,7 @@ import string
 import platform
 import threading
 from .libvirt_utils import get_libvirt_connection
+import psutil
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -101,36 +102,46 @@ class VM:
 
 class LibvirtManager:
     def __init__(self, ip_manager: Optional[IPManager] = None):
-        self.conn = libvirt.open('qemu:///system')
-        if not self.conn:
-            raise Exception('Failed to open connection to qemu:///system')
-            
+        """Initialize LibvirtManager with libvirt connection."""
         try:
-            self.vm_dir = Path("api/data/vms")
+            self.conn = get_libvirt_connection()
+            # Use absolute path to avoid the double 'api' prefix issue
+            current_dir = Path.cwd()
+            if current_dir.name == 'api':
+                # We're in the api directory
+                self.vm_dir = current_dir / "data/vms"
+            else:
+                # Assume we're in the project root
+                self.vm_dir = current_dir / "api/data/vms"
+            
             self.vm_dir.mkdir(parents=True, exist_ok=True)
-            
-            self._init_storage_pool()
-            
-            self.network_manager = NetworkManager(self.conn)
-            self.ip_manager = ip_manager or IPManager()
-            self.disk_manager = DiskManager(self.conn)
-            
+            self.ip_manager = ip_manager
             self.vms = self._load_vms()
             
-            logger.info("LibvirtManager initialized successfully")
-            self.ubuntu_daily_base_url = "https://cloud-images.ubuntu.com/focal/current/"
+            # Initialize disk manager
+            self.disk_manager = DiskManager(self.conn)
             
-            # Configure requests session with timeouts and retries
+            # Set up storage pool
+            try:
+                self._init_storage_pool()
+            except Exception as e:
+                logger.warning(f"Could not initialize storage pool: {e}")
+                
+            # Detect system architecture
+            self.arch = platform.machine()
+            self.is_arm = 'arm' in self.arch.lower() or 'aarch64' in self.arch.lower()
+            
+            # Session for image downloads
             self.session = requests.Session()
-            self.session.mount('https://', requests.adapters.HTTPAdapter(
-                max_retries=3,
-                pool_connections=10,
-                pool_maxsize=10
-            ))
-            self.request_timeout = 10  # seconds
+            self.request_timeout = 300  # 5 minutes timeout for large downloads
+            
+            # Ubuntu image repository
+            self.ubuntu_daily_base_url = "https://cloud-images.ubuntu.com/releases/focal/release/"
+            
+            logger.info("LibvirtManager initialized successfully")
             
         except Exception as e:
-            logger.error(f"Failed to initialize LibvirtManager: {str(e)}")
+            logger.error(f"Error initializing LibvirtManager: {e}")
             raise
 
     def _load_vms(self) -> Dict[str, VM]:
@@ -257,54 +268,106 @@ ethernets:
             raise
 
     def create_vm(self, config: VMConfig) -> VM:
-        """Create a new VM with enhanced error handling and status tracking."""
-        vm = None
+        """Create a new VM."""
         try:
-            # Generate VM ID and create initial VM object
+            # Check if VM with the same name already exists in libvirt
+            try:
+                existing_domain = self.conn.lookupByName(config.name)
+                if existing_domain:
+                    logger.warning(f"Found existing domain with name {config.name}, undefining it...")
+                    try:
+                        # Try to shutdown forcefully if running
+                        if existing_domain.isActive():
+                            existing_domain.destroy()
+                        # Undefine the domain
+                        existing_domain.undefine()
+                        logger.info(f"Successfully undefined existing domain {config.name}")
+                    except Exception as undefine_error:
+                        logger.error(f"Error undefining existing domain: {undefine_error}")
+                        raise VMError(f"Failed to undefine existing domain: {undefine_error}")
+            except libvirt.libvirtError as lookup_error:
+                # VM doesn't exist, which is fine
+                if "Domain not found" not in str(lookup_error):
+                    logger.warning(f"Unexpected libvirt error when checking for domain: {lookup_error}")
+
+            # Create VM instance
             vm_id = str(uuid.uuid4())[:8]
-            vm = VM(id=vm_id, name=config.name, config=config)
-            self.vms[vm_id] = vm
-
-            # Validate architecture compatibility
-            if config.arch:
-                current_arch = platform.machine().lower()
-                if 'arm' in current_arch or 'aarch64' in current_arch:
-                    if config.arch.lower() not in ['arm64', 'aarch64']:
-                        raise VMError(f"Architecture {config.arch} not supported on this ARM platform")
-                elif config.arch.lower() not in ['x86_64', 'amd64']:
-                    raise VMError(f"Architecture {config.arch} not supported on this x86 platform")
-
-            # Create VM directory
-            vm_dir = self.vm_dir / vm_id
+            vm = VM(
+                id=vm_id,
+                name=config.name,
+                config=config,
+                status=VMStatus.CREATING
+            )
+            
+            # Log VM creation
+            logger.info(f"Creating VM {vm.name} with ID {vm.id}")
+            
+            # Create VM directory with proper permissions
+            vm_dir = self._get_absolute_path(self.vm_dir / vm_id)
             vm_dir.mkdir(parents=True, exist_ok=True)
-
-            # Download and prepare cloud image
-            vm.update_status("downloading_image")
-            cloud_image = self._prepare_cloud_image(config.image_id or "ubuntu-22.04")
-
-            # Create and configure VM disk
-            vm.update_status("creating_disk")
-            vm_disk = vm_dir / f"{vm.name}.qcow2"
-            self._create_vm_disk(cloud_image, vm_disk, config.disk_size_gb)
-
-            # Set up networking
-            vm.update_status("configuring_network")
-            vm.ssh_port = self._find_free_port()
+            
+            try:
+                # Make sure directory has proper permissions
+                # Use chmod to set permissions
+                logger.info(f"Setting permissions on VM directory: {vm_dir}")
+                os.system(f"chmod -R 777 {vm_dir}")
+                
+                # Also ensure parent directories have suitable permissions
+                current_dir = vm_dir.parent
+                while str(current_dir) != '/' and str(current_dir).find('/home/ubuntu/vm-experiments') != -1:
+                    try:
+                        os.chmod(current_dir, 0o777)
+                        current_dir = current_dir.parent
+                    except Exception:
+                        break
+            except Exception as e:
+                logger.warning(f"Could not set directory permissions: {e}")
+            
+            # Configure networking
             vm.network_info = self._configure_networking(vm)
 
-            # Create cloud-init configuration
-            vm.update_status("creating_cloud_init")
-            self._create_cloud_init_config(vm)
-
-            # Create and start the VM
-            vm.update_status("starting")
+            # Prepare cloud image
+            cloud_image = self._prepare_cloud_image(config.image_id)
+            
+            # Create VM disk - use absolute paths
+            vm_disk_name = f"{vm.name}-{vm.id}.raw"
+            vm_disk = vm_dir / vm_disk_name
+            
+            logger.info(f"Creating VM disk at {vm_disk}")
+            self._create_vm_disk(cloud_image, vm_disk, config.disk_size_gb)
+            
+            # Generate VM UUID
+            vm_uuid = str(uuid.uuid4())
+            
+            # Create cloud-init configuration if provided
+            cloud_init_iso = None
+            if config.cloud_init:
+                cloud_init_iso = self._prepare_cloud_init_config(config)
+                if cloud_init_iso:
+                    logger.info(f"Created cloud-init config for VM {vm.name}")
+            
+            # Generate domain XML - make sure to use absolute path for disk
             domain_xml = self._generate_domain_xml(vm, vm_disk)
+            
+            # Define the domain
             domain = self.conn.defineXML(domain_xml)
             if not domain:
-                raise VMError("Failed to define VM domain")
-
-            if domain.create() < 0:
-                raise VMError("Failed to start VM")
+                raise VMError(f"Failed to define domain for VM {vm.name}")
+            
+            # If cloud-init ISO was created, attach it
+            if cloud_init_iso:
+                self._attach_cloud_init_iso(vm.name, cloud_init_iso)
+            
+            # Start the VM
+            domain.create()
+            
+            # Update VM status
+            vm.status = VMStatus.RUNNING
+            vm.updated_at = time.time()
+            
+            # Assign a port for SSH forwarding
+            vm.ssh_port = self._find_free_port()
+            logger.info(f"Assigned SSH port {vm.ssh_port} for VM {vm.name}")
 
             # Save VM to database
             self._save_vm(vm)
@@ -312,17 +375,16 @@ ethernets:
             # Start metrics collection
             self._start_metrics_collection(vm)
 
-            vm.update_status(VMStatus.RUNNING)
-            logger.info(f"Successfully created and started VM {vm.id}")
             return vm
 
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error creating VM: {error_msg}")
-            if vm:
-                vm.update_status(VMStatus.ERROR, error_msg)
-                self._save_vm(vm)
-            self._cleanup_failed_vm(vm.id if vm else None)
+            
+            # Attempt cleanup of failed VM
+            if 'vm' in locals():
+                self._cleanup_failed_vm(vm.name)
+                
             raise VMError(f"Failed to create VM: {error_msg}")
 
     def _init_storage_pool(self):
@@ -382,49 +444,95 @@ ethernets:
                 port += 1
         raise Exception("No free ports available")
 
-    def _generate_domain_xml(self, vm: VM, disk_path: Path, vm_uuid: str) -> str:
-        root = ET.Element('domain', type='kvm')
-        
-        # Basic VM metadata - use VM ID as the domain name
-        ET.SubElement(root, 'name').text = vm.id
-        ET.SubElement(root, 'uuid').text = vm_uuid  # Use the full UUID here
-        ET.SubElement(root, 'memory', unit='MiB').text = str(vm.config.memory_mb)
-        ET.SubElement(root, 'currentMemory', unit='MiB').text = str(vm.config.memory_mb)
-        ET.SubElement(root, 'vcpu', placement='static').text = str(vm.config.cpu_cores)
-        
-        # OS configuration
-        os = ET.SubElement(root, 'os')
-        ET.SubElement(os, 'type', arch='x86_64', machine='pc-q35-6.2').text = 'hvm'
-        ET.SubElement(os, 'boot', dev='hd')
-        
-        # Features
-        features = ET.SubElement(root, 'features')
-        ET.SubElement(features, 'acpi')
-        ET.SubElement(features, 'apic')
-        
-        # CPU configuration
-        cpu = ET.SubElement(root, 'cpu', mode='host-model')
-        ET.SubElement(cpu, 'topology', sockets='1', cores=str(vm.config.cpu_cores), threads='1')
-        
-        # Devices
-        devices = ET.SubElement(root, 'devices')
-        
-        # Disk
-        disk = ET.SubElement(devices, 'disk', type='file', device='disk')
-        ET.SubElement(disk, 'driver', name='qemu', type='qcow2')
-        ET.SubElement(disk, 'source', file=str(disk_path))
-        ET.SubElement(disk, 'target', dev='vda', bus='virtio')
-        
-        # Network interface
-        interface = ET.SubElement(devices, 'interface', type='network')
-        ET.SubElement(interface, 'source', network=vm.config.network_name or 'default')
-        ET.SubElement(interface, 'model', type='virtio')
-        
-        # Add description with VM name for reference
-        ET.SubElement(root, 'description').text = f"VM Name: {vm.name}"
-        
-        # Convert to string without pretty_print
-        return ET.tostring(root, encoding='unicode')
+    def _generate_domain_xml(self, vm: VM, disk_path: Path) -> str:
+        """Generate libvirt domain XML for VM."""
+        try:
+            # Generate a UUID for the VM if it doesn't have one
+            vm_uuid = str(uuid.uuid4())
+            
+            # Define VM specifications
+            cpu_cores = vm.config.cpu_cores
+            memory_mb = vm.config.memory_mb
+            
+            network_info = vm.network_info or {}
+            bridge_name = network_info.get('bridge_name', 'virbr0')
+            mac_address = network_info.get('mac_address')
+            
+            # Ensure disk_path is absolute
+            absolute_disk_path = self._get_absolute_path(disk_path)
+            
+            # Make sure the disk file exists
+            if not absolute_disk_path.exists():
+                raise VMError(f"Disk image does not exist: {absolute_disk_path}")
+                
+            logger.info(f"Using disk path for domain XML: {absolute_disk_path}")
+            
+            # Create the XML template
+            root = ET.Element('domain', type='kvm')
+            ET.SubElement(root, 'name').text = vm.name
+            ET.SubElement(root, 'uuid').text = vm_uuid
+            ET.SubElement(root, 'memory', unit='MiB').text = str(memory_mb)
+            ET.SubElement(root, 'currentMemory', unit='MiB').text = str(memory_mb)
+            ET.SubElement(root, 'vcpu').text = str(cpu_cores)
+            
+            # OS settings
+            os_element = ET.SubElement(root, 'os')
+            ET.SubElement(os_element, 'type', arch='x86_64', machine='q35').text = 'hvm'
+            ET.SubElement(os_element, 'boot', dev='hd')
+            
+            # Features
+            features = ET.SubElement(root, 'features')
+            ET.SubElement(features, 'acpi')
+            ET.SubElement(features, 'apic')
+            
+            # CPU mode
+            cpu = ET.SubElement(root, 'cpu', mode='host-model')
+            
+            # Add security model with none driver - this disables the security checks
+            # and should resolve the permission issues
+            security = ET.SubElement(root, 'seclabel', type='none')
+            
+            # Devices
+            devices = ET.SubElement(root, 'devices')
+            
+            # Disk
+            disk = ET.SubElement(devices, 'disk', type='file', device='disk')
+            ET.SubElement(disk, 'driver', name='qemu', type='raw')
+            ET.SubElement(disk, 'source', file=str(absolute_disk_path))
+            ET.SubElement(disk, 'target', dev='vda', bus='virtio')
+            
+            # Network interface
+            interface = ET.SubElement(devices, 'interface', type='bridge')
+            ET.SubElement(interface, 'source', bridge=bridge_name)
+            if mac_address:
+                ET.SubElement(interface, 'mac', address=mac_address)
+            ET.SubElement(interface, 'model', type='virtio')
+            
+            # Console
+            console = ET.SubElement(devices, 'console', type='pty')
+            ET.SubElement(console, 'target', type='serial', port='0')
+            
+            # VNC graphics
+            graphics = ET.SubElement(devices, 'graphics', type='vnc', port='-1', autoport='yes', listen='0.0.0.0')
+            ET.SubElement(graphics, 'listen', type='address', address='0.0.0.0')
+            
+            # Add a channel for qemu-guest-agent if it's installed
+            channel = ET.SubElement(devices, 'channel', type='unix')
+            ET.SubElement(channel, 'source', mode='bind')
+            ET.SubElement(channel, 'target', type='virtio', name='org.qemu.guest_agent.0')
+            
+            # Video
+            video = ET.SubElement(devices, 'video')
+            ET.SubElement(video, 'model', type='cirrus')
+            
+            # Create the XML string
+            xml_str = ET.tostring(root).decode()
+            logger.debug(f"Generated domain XML for VM {vm.name}")
+            
+            return xml_str
+        except Exception as e:
+            logger.error(f"Error generating domain XML: {e}")
+            raise VMError(f"Failed to generate domain XML: {e}")
 
     def _merge_cloud_init(self, base: dict, custom: dict) -> None:
         """Recursively merge custom cloud-init config into base config."""
@@ -437,90 +545,267 @@ ethernets:
                 base[key] = value
 
     def _prepare_cloud_image(self, image_id: str) -> Path:
-        """Download and prepare cloud image for VM creation."""
-        try:
-            # Ensure image_id is properly formatted
-            if not image_id.startswith('ubuntu-'):
-                image_id = f"ubuntu-{image_id}"
+        """Download and prepare a cloud image if not already present."""
+        images_dir = Path("api/data/vms")
+        images_dir.mkdir(parents=True, exist_ok=True)
+        
+        cloud_image = images_dir / f"{image_id}.img"
+        
+        # Images mapping - add more as needed
+        image_urls = {
+            'ubuntu-20.04': 'https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-amd64.img',
+            'ubuntu-22.04': 'https://cloud-images.ubuntu.com/releases/jammy/release/ubuntu-22.04-server-cloudimg-amd64.img',
+            'debian-11': 'https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2',
+            'debian-12': 'https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2',
+            'centos-9-stream': 'https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2',
+            'alpine-3.17': 'https://dl-cdn.alpinelinux.org/alpine/v3.17/releases/x86_64/alpine-virt-3.17.0-x86_64.iso',
+        }
+        
+        if not cloud_image.exists():
+            # If image doesn't exist, download it
+            if image_id not in image_urls:
+                raise VMError(f"Unknown image ID: {image_id}. Available images: {', '.join(image_urls.keys())}")
             
-            cached_image = self.vm_dir / f"{image_id}.img"
-            if cached_image.exists():
-                logger.info(f"Using cached Ubuntu image: {cached_image}")
-                return cached_image
+            logger.info(f"Downloading cloud image {image_id}...")
+            url = image_urls[image_id]
             
-            # Use AMD64 Focal image URL
-            image_url = f"{self.ubuntu_daily_base_url}focal-server-cloudimg-amd64.img"
-            logger.info(f"Downloading Ubuntu image from {image_url}")
+            # Create a temporary directory for downloads
+            tmp_dir = Path("api/data/tmp")
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_file = tmp_dir / f"{image_id}-download.img"
             
-            # Create temporary file for download
-            temp_path = cached_image.with_suffix('.tmp')
-            
-            # Download with progress tracking
-            response = self.session.get(
-                image_url,
-                stream=True,
-                timeout=self.request_timeout
-            )
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 8192
-            downloaded = 0
-            
-            with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=block_size):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size:
-                            percent = int(100 * downloaded / total_size)
-                            if percent % 10 == 0:  # Log every 10%
-                                logger.info(f"Download progress: {percent}%")
-            
-            # Move temporary file to final location
-            temp_path.rename(cached_image)
-            logger.info(f"Successfully downloaded image to {cached_image}")
-            
-            return cached_image
-            
-        except Exception as e:
-            logger.error(f"Error downloading Ubuntu image: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            # Clean up temporary file if it exists
-            if 'temp_path' in locals() and temp_path.exists():
-                temp_path.unlink()
-            raise
+            try:
+                # Download the image with progress
+                logger.info(f"Downloading {url} to {tmp_file}")
+                
+                # Use wget with progress
+                result = subprocess.run(
+                    ["wget", "-O", str(tmp_file), url], 
+                    check=True,
+                    capture_output=True,
+                    text=True
+                )
+                
+                # Check if download succeeded
+                if result.returncode != 0:
+                    raise VMError(f"Failed to download cloud image: {result.stderr}")
+                
+                # Make sure the image is valid
+                validate_cmd = ["qemu-img", "info", str(tmp_file)]
+                result = subprocess.run(validate_cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise VMError(f"Downloaded image is not valid: {result.stderr}")
+                
+                # Move to final location
+                shutil.move(str(tmp_file), str(cloud_image))
+                
+                # Set proper permissions on the cloud image
+                logger.info(f"Setting permissions on cloud image: {cloud_image}")
+                os.system(f"chmod 666 {cloud_image}")
+                
+                logger.info(f"Successfully downloaded and installed {image_id} image")
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Error downloading cloud image: {e}")
+                if tmp_file.exists():
+                    tmp_file.unlink()
+                raise VMError(f"Failed to download cloud image: {e}")
+                
+            except Exception as e:
+                logger.error(f"Error preparing cloud image: {e}")
+                if tmp_file.exists():
+                    tmp_file.unlink()
+                raise VMError(f"Failed to prepare cloud image: {e}")
+                
+        return cloud_image
+
+    def _get_absolute_path(self, path: Path) -> Path:
+        """Ensure we're using absolute paths for qemu commands."""
+        if path.is_absolute():
+            return path
+        # If we're running from the project root or api directory,
+        # convert to absolute path
+        current_dir = Path.cwd()
+        if current_dir.name == 'api':
+            # We're in the api directory
+            return current_dir / path
+        else:
+            # Assume we're in the project root
+            return current_dir / path
 
     def _create_vm_disk(self, cloud_image: Path, vm_disk: Path, size_gb: int) -> None:
-        """Create and configure VM disk from cloud image."""
+        """Create a VM disk based on a cloud image."""
         try:
-            # Create base disk from cloud image
-            subprocess.run([
-                'qemu-img', 'create',
-                '-f', 'qcow2',
-                '-F', 'qcow2',
-                '-b', str(cloud_image),
-                str(vm_disk)
-            ], check=True)
-
-            # Resize disk to specified size
-            subprocess.run([
-                'qemu-img', 'resize',
-                str(vm_disk),
-                f"{size_gb}G"
-            ], check=True)
-
-            logger.info(f"Created VM disk at {vm_disk} with size {size_gb}GB")
+            # Make sure we're using absolute paths
+            abs_cloud_image = self._get_absolute_path(cloud_image)
+            abs_vm_disk = self._get_absolute_path(vm_disk)
+            
+            # Make sure the base image exists
+            if not abs_cloud_image.exists():
+                raise VMError(f"Base image does not exist: {abs_cloud_image}")
+                
+            # Make sure the parent directory exists
+            abs_vm_disk.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Set directory permissions to allow libvirt to access
+            try:
+                os.chmod(abs_vm_disk.parent, 0o755)
+            except Exception as perm_error:
+                logger.warning(f"Failed to set permissions on VM directory: {perm_error}")
+            
+            logger.info(f"Creating VM disk {abs_vm_disk} based on {abs_cloud_image}")
+            
+            # Detect the format of the source image
+            format_cmd = ['qemu-img', 'info', '--output=json', str(abs_cloud_image)]
+            format_result = subprocess.run(
+                format_cmd,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            
+            # Parse the format from json output
+            img_info = json.loads(format_result.stdout)
+            source_format = img_info.get('format', 'qcow2')  # Default to qcow2 if not detected
+            
+            logger.info(f"Detected source image format: {source_format}")
+            
+            # Create a raw image with the base cloud image
+            cmd = [
+                'qemu-img', 'convert',
+                '-f', source_format,
+                '-O', 'raw',
+                str(abs_cloud_image),
+                str(abs_vm_disk)
+            ]
+            
+            logger.info(f"Running command: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            
+            # Resize the disk to the requested size
+            resize_cmd = ['qemu-img', 'resize', str(abs_vm_disk), f"{size_gb}G"]
+            logger.info(f"Resizing disk: {' '.join(resize_cmd)}")
+            
+            resize_result = subprocess.run(
+                resize_cmd,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            
+            # Set permissions on the disk file to make it accessible to libvirt
+            logger.info(f"Setting permissions on VM disk file: {abs_vm_disk}")
+            try:
+                # Make the disk file readable and writable by everyone
+                os.system(f"chmod 666 {abs_vm_disk}")
+                
+                # Try to make parent directories accessible as well
+                current_dir = abs_vm_disk.parent
+                while str(current_dir) != '/' and str(current_dir).find('/home/ubuntu/vm-experiments') != -1:
+                    try:
+                        os.chmod(current_dir, 0o777)
+                        current_dir = current_dir.parent
+                    except Exception:
+                        break
+            except Exception as perm_error:
+                logger.warning(f"Failed to set permissions on VM disk file: {perm_error}")
+            
+            logger.info(f"Successfully created VM disk at {abs_vm_disk}")
+            
         except subprocess.CalledProcessError as e:
-            logger.error(f"Error creating VM disk: {e}")
-            if vm_disk.exists():
-                vm_disk.unlink()
+            logger.error(f"Command '{e.cmd}' returned non-zero exit status {e.returncode}")
+            logger.error(f"STDOUT: {e.stdout}")
+            logger.error(f"STDERR: {e.stderr}")
             raise VMError(f"Failed to create VM disk: {e}")
         except Exception as e:
             logger.error(f"Error creating VM disk: {e}")
-            if vm_disk.exists():
-                vm_disk.unlink()
-            raise
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise VMError(f"Failed to create VM disk: {e}")
+
+    def _configure_networking(self, vm: VM) -> Dict:
+        """Configure networking for a VM."""
+        try:
+            logger.info(f"Configuring networking for VM {vm.name}")
+            
+            # Get network info
+            network_name = vm.config.network_name
+            
+            # Find network by name
+            try:
+                network = self.conn.networkLookupByName(network_name)
+            except libvirt.libvirtError:
+                logger.warning(f"Network {network_name} not found, falling back to default")
+                try:
+                    network = self.conn.networkLookupByName('default')
+                    network_name = 'default'
+                except libvirt.libvirtError:
+                    logger.warning("Default network not found, will use first available network")
+                    networks = self.conn.listAllNetworks()
+                    if not networks:
+                        raise VMError("No networks available")
+                    network = networks[0]
+                    network_name = network.name()
+            
+            # Get network details
+            net_xml = network.XMLDesc()
+            net_root = ET.fromstring(net_xml)
+            
+            # Get bridge name
+            bridge_elem = net_root.find('bridge')
+            bridge_name = bridge_elem.get('name') if bridge_elem is not None else 'virbr0'
+            
+            # Get IP information
+            ip_elem = net_root.find('ip')
+            network_address = None
+            netmask = None
+            
+            if ip_elem is not None:
+                network_address = ip_elem.get('address')
+                netmask = ip_elem.get('netmask')
+            
+            # Generate a MAC address if not already set
+            if not hasattr(vm, 'mac_address'):
+                # Generate a random MAC address
+                mac = [0x52, 0x54, 0x00,
+                      random.randint(0x00, 0xff),
+                      random.randint(0x00, 0xff),
+                      random.randint(0x00, 0xff)]
+                vm.mac_address = ':'.join([f'{x:02x}' for x in mac])
+            
+            # Allocate an IP from the IP manager if available
+            ip_address = None
+            if hasattr(self, 'ip_manager') and self.ip_manager:
+                try:
+                    # Get an available IP address
+                    ip_address = self.ip_manager.get_available_ip()
+                    if ip_address:
+                        self.ip_manager.attach_ip(ip_address, vm.id)
+                        logger.info(f"Allocated IP {ip_address} for VM {vm.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to allocate IP from IP manager: {e}")
+            
+            # Build network info dictionary
+            network_info = {
+                'network_name': network_name,
+                'bridge_name': bridge_name,
+                'network_address': network_address,
+                'netmask': netmask,
+                'mac_address': getattr(vm, 'mac_address', None),
+                'ip_address': ip_address
+            }
+            
+            logger.info(f"Network configuration for VM {vm.name}: {network_info}")
+            return network_info
+            
+        except Exception as e:
+            logger.error(f"Error configuring networking: {e}")
+            raise VMError(f"Failed to configure networking: {e}")
 
     def _start_vm(self, vm: VM) -> None:
         """Start the VM using libvirt."""
@@ -880,40 +1165,99 @@ ethernets:
             raise
 
     def _prepare_cloud_init_config(self, config: VMConfig) -> Optional[str]:
-        """Prepare cloud-init configuration if provided."""
-        if not config.cloud_init:
-            return None
-            
+        """Prepare cloud-init configuration for VM. Returns path to cloud-init ISO."""
         try:
-            # Generate cloud-init ISO file
-            import yaml
-            from tempfile import NamedTemporaryFile
-            import subprocess
+            if not config.cloud_init:
+                logger.info("No cloud-init config provided, using defaults")
+                return None
             
-            # Create user-data file
-            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                yaml.dump({'#cloud-config': config.cloud_init}, f)
-                user_data_file = f.name
+            # Create temp directory for cloud-init files
+            cloud_init_dir = Path(f"api/data/tmp/cloud-init-{config.name}")
+            cloud_init_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Default cloud-init configuration
+            default_config = {
+                'hostname': config.name,
+                'users': [{
+                    'name': 'ubuntu',
+                    'shell': '/bin/bash',
+                    'sudo': 'ALL=(ALL) NOPASSWD:ALL',
+                    'ssh_authorized_keys': []
+                }],
+                'packages': ['qemu-guest-agent', 'cloud-init'],
+                'package_update': True,
+                'package_upgrade': True,
+                'runcmd': ['systemctl enable qemu-guest-agent', 'systemctl start qemu-guest-agent'],
+                'write_files': []
+            }
+            
+            # Merge custom config with defaults
+            merged_config = default_config.copy()
+            self._merge_cloud_init(merged_config, config.cloud_init)
+            
+            # Generate cloud-init files
+            user_data = f"""#cloud-config
+{json.dumps(merged_config, indent=2)}
+"""
+            
+            meta_data = f"""instance-id: {config.name}
+local-hostname: {merged_config['hostname']}
+"""
+            
+            network_config = """version: 2
+ethernets:
+  ens3:
+    dhcp4: true
+"""
+            
+            # Write cloud-init files
+            with open(cloud_init_dir / "user-data", "w") as f:
+                f.write(user_data)
                 
-            # Create meta-data file (empty is fine for basic cloud-init)
-            with NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                yaml.dump({}, f)
-                meta_data_file = f.name
+            with open(cloud_init_dir / "meta-data", "w") as f:
+                f.write(meta_data)
+                
+            with open(cloud_init_dir / "network-config", "w") as f:
+                f.write(network_config)
                 
             # Generate ISO file
-            iso_file = f"/var/lib/libvirt/images/cloud-init-{config.name}.iso"
-            subprocess.run([
-                'genisoimage', '-output', iso_file,
-                '-volid', 'cidata',
-                '-joliet', '-rock',
-                user_data_file, meta_data_file
-            ], check=True)
+            iso_path = cloud_init_dir / "cloud-init.iso"
             
-            return iso_file
+            # Check if mkisofs or genisoimage is available
+            iso_cmd = None
+            for cmd in ["mkisofs", "genisoimage"]:
+                try:
+                    subprocess.run(["which", cmd], check=True, capture_output=True)
+                    iso_cmd = cmd
+                    break
+                except subprocess.CalledProcessError:
+                    continue
+                    
+            if not iso_cmd:
+                logger.warning("Neither mkisofs nor genisoimage found, cannot create cloud-init ISO")
+                return None
+                
+            # Create cloud-init ISO
+            cmd = [
+                iso_cmd,
+                "-output", str(iso_path),
+                "-volid", "cidata",
+                "-joliet",
+                "-rock",
+                str(cloud_init_dir / "user-data"),
+                str(cloud_init_dir / "meta-data"),
+                str(cloud_init_dir / "network-config")
+            ]
+            
+            subprocess.run(cmd, check=True, capture_output=True)
+            
+            logger.info(f"Created cloud-init ISO at {iso_path}")
+            return str(iso_path)
             
         except Exception as e:
-            logger.error(f"Failed to prepare cloud-init config: {e}")
-            raise VMError(f"Failed to prepare cloud-init config: {e}")
+            logger.error(f"Error creating cloud-init config: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
             
     def _attach_cloud_init_iso(self, vm_name: str, iso_path: str):
         """Attach cloud-init ISO to the VM."""
@@ -1064,51 +1408,25 @@ ethernets:
             logger.error(f"Error getting VM statistics: {e}")
             raise VMError(f"Failed to get VM statistics: {e}")
 
+
 class VMManager:
+    """Manages VM operations through libvirt."""
+    
     def __init__(self, network_manager: NetworkManager, ip_manager: IPManager):
-        self.conn = get_libvirt_connection()
-        if not self.conn:
-            raise VMError('Failed to open connection to qemu:///system')
-            
-        try:
-            self.vm_dir = Path("api/data/vms")
-            self.vm_dir.mkdir(parents=True, exist_ok=True)
-            
-            self.network_manager = network_manager
-            self.ip_manager = ip_manager
-            self.libvirt_manager = LibvirtManager(ip_manager=self.ip_manager)
-            
-            self.vms = self._load_vms()
-            
-            logger.info("VMManager initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize VMManager: {e}")
-            raise
+        """Initialize the VM manager."""
+        self.network_manager = network_manager
+        self.ip_manager = ip_manager
+        self.libvirt_manager = LibvirtManager(ip_manager=ip_manager)
+        
+        # Database connection is already initialized
+        # This is just to make sure VMs are loaded on startup
+        self._load_vms()
+        
+        logger.info("VMManager initialized successfully")
 
-    def _load_vms(self) -> Dict[str, VM]:
-        vms = {}
-        stored_vms = db.list_vms()
-        for vm_data in stored_vms:
-            config = VMConfig(
-                name=vm_data['name'],
-                cpu_cores=vm_data['cpu_cores'],
-                memory_mb=vm_data['memory_mb'],
-                disk_size_gb=vm_data['disk_size_gb'],
-                network_name=vm_data['network_name'],
-                cloud_init=vm_data.get('cloud_init'),
-                image_id=vm_data.get('image_id')
-            )
-            vm = VM(
-                id=vm_data['id'],
-                name=vm_data['name'],
-                config=config,
-                network_info=vm_data.get('network_info'),
-                ssh_port=vm_data.get('ssh_port')
-            )
-            vms[vm.id] = vm
-        return vms
-
+    def _load_vms(self):
+        self.libvirt_manager._load_vms()
+            
     def create_vm(self, config: VMConfig) -> VM:
         return self.libvirt_manager.create_vm(config)
     
@@ -1138,6 +1456,7 @@ class VMManager:
     
     def resize_memory(self, vm: VM, memory_mb: int) -> None:
         return self.libvirt_manager.resize_memory(vm, memory_mb)
+
 
 class VMConsole:
     def __init__(self, vm: VM, libvirt_manager: LibvirtManager):

@@ -11,5 +11,5 @@ def get_libvirt_connection():
             raise Exception('Failed to connect to QEMU/KVM')
         return conn
     except libvirt.libvirtError as e:
-        logger.error(f"Failed to connect to libvirt: {e}")
+        logger.error(f"Fai  led to connect to libvirt: {e}")
         raise Exception(f"Failed to connect to libvirt: {e}") 

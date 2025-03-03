@@ -128,6 +128,20 @@ class Database:
             )
             """)
 
+            # Create disks table
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS disks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                size_gb INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                attached_to TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (attached_to) REFERENCES vms(id) ON DELETE SET NULL
+            )
+            """)
+
     def save_vm(self, vm_id: str, data: Dict[str, Any]) -> None:
         """Create or update a VM in the database."""
         with self.get_connection() as conn:
@@ -365,34 +379,106 @@ class Database:
     def update_vm(self, vm_id: str, data: Dict[str, Any]) -> None:
         """Update a VM's configuration in the database."""
         with self.get_connection() as conn:
-            now = time.time()
-            conn.execute("""
-            UPDATE vms SET
-                name = ?,
-                config = ?,
-                network_info = ?,
-                ssh_port = ?,
-                status = ?,
-                updated_at = ?,
-                error_message = ?
-            WHERE id = ?
-            """, (
-                data['name'],
-                json.dumps({
-                    'cpu_cores': data['cpu_cores'],
-                    'memory_mb': data['memory_mb'],
-                    'disk_size_gb': data['disk_size_gb'],
-                    'network_name': data['network_name'],
-                    'cloud_init': data.get('cloud_init'),
-                    'image_id': data.get('image_id')
-                }),
-                json.dumps(data.get('network_info')),
-                data.get('ssh_port'),
-                data.get('status', 'creating'),
-                now,
-                data.get('error_message'),
-                vm_id
-            ))
+            # Prepare the data for update
+            update_fields = []
+            params = []
+            
+            if 'name' in data:
+                update_fields.append("name = ?")
+                params.append(data['name'])
+            
+            if 'config' in data:
+                config = {
+                    'cpu_cores': data['config'].get('cpu_cores'),
+                    'memory_mb': data['config'].get('memory_mb'),
+                    'disk_size_gb': data['config'].get('disk_size_gb'),
+                    'network_name': data['config'].get('network_name'),
+                    'cloud_init': data['config'].get('cloud_init'),
+                    'image_id': data['config'].get('image_id')
+                }
+                update_fields.append("config = ?")
+                params.append(json.dumps(config))
+            
+            if 'network_info' in data:
+                update_fields.append("network_info = ?")
+                params.append(json.dumps(data['network_info']))
+            
+            if 'ssh_port' in data:
+                update_fields.append("ssh_port = ?")
+                params.append(data['ssh_port'])
+            
+            if 'status' in data:
+                update_fields.append("status = ?")
+                params.append(data['status'])
+            
+            update_fields.append("updated_at = ?")
+            params.append(time.time())
+            
+            if 'error_message' in data:
+                update_fields.append("error_message = ?")
+                params.append(data['error_message'])
+            
+            # Add VM ID to params
+            params.append(vm_id)
+            
+            # Execute the update
+            query = f"UPDATE vms SET {', '.join(update_fields)} WHERE id = ?"
+            conn.execute(query, params)
+
+    # Disk management methods
+    def create_disk(self, disk_id: str, data: Dict) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO disks (id, name, size_gb, state, attached_to, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (disk_id, data['name'], data['size_gb'], data.get('state', 'available'), 
+                 data.get('attached_to'), time.time(), time.time())
+            )
+    
+    def update_disk(self, disk_id: str, data: Dict) -> None:
+        with self.get_connection() as conn:
+            update_fields = []
+            params = []
+            
+            if 'name' in data:
+                update_fields.append("name = ?")
+                params.append(data['name'])
+            
+            if 'size_gb' in data:
+                update_fields.append("size_gb = ?")
+                params.append(data['size_gb'])
+            
+            if 'state' in data:
+                update_fields.append("state = ?")
+                params.append(data['state'])
+            
+            if 'attached_to' in data:
+                update_fields.append("attached_to = ?")
+                params.append(data['attached_to'])
+            
+            update_fields.append("updated_at = ?")
+            params.append(time.time())
+            
+            params.append(disk_id)
+            
+            query = f"UPDATE disks SET {', '.join(update_fields)} WHERE id = ?"
+            conn.execute(query, params)
+    
+    def delete_disk(self, disk_id: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM disks WHERE id = ?", (disk_id,))
+    
+    def get_disk(self, disk_id: str) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM disks WHERE id = ?", (disk_id,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+    
+    def list_disks(self) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM disks ORDER BY created_at DESC")
+            return [dict(row) for row in cursor.fetchall()]
 
 # Create a global database instance
 db = Database() 
