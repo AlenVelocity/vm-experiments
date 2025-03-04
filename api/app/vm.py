@@ -102,20 +102,33 @@ class VM:
 
 class LibvirtManager:
     def __init__(self, ip_manager: Optional[IPManager] = None):
-        """Initialize LibvirtManager with libvirt connection."""
+        """Initialize the LibvirtManager."""
         try:
             self.conn = get_libvirt_connection()
-            # Use absolute path to avoid the double 'api' prefix issue
-            current_dir = Path.cwd()
-            if current_dir.name == 'api':
-                # We're in the api directory
-                self.vm_dir = current_dir / "data/vms"
-            else:
-                # Assume we're in the project root
-                self.vm_dir = current_dir / "api/data/vms"
-            
-            self.vm_dir.mkdir(parents=True, exist_ok=True)
+        if not self.conn:
+                raise VMError("Failed to establish libvirt connection")
+                
             self.ip_manager = ip_manager
+            
+            # Define important directories
+            try:
+                # Try to use the symlinked directory in libvirt images
+                self.vm_dir = Path("/var/lib/libvirt/images/vm-experiments")
+                
+                # If that doesn't exist, fall back to the app directory
+                if not self.vm_dir.exists():
+                    logger.warning(f"Symlinked directory {self.vm_dir} not found, falling back to app directory")
+            self.vm_dir = Path("api/data/vms")
+                    
+                # Make sure our VM directory exists
+                if not self.vm_dir.exists():
+            self.vm_dir.mkdir(parents=True, exist_ok=True)
+            
+                logger.info(f"Using VM directory: {self.vm_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to set up VM directory: {e}, falling back to default")
+                self.vm_dir = Path("api/data/vms")
+            
             self.vms = self._load_vms()
             
             # Initialize disk manager
@@ -305,12 +318,14 @@ ethernets:
             # Create VM directory with proper permissions
             vm_dir = self._get_absolute_path(self.vm_dir / vm_id)
             vm_dir.mkdir(parents=True, exist_ok=True)
-            
+
             try:
                 # Make sure directory has proper permissions
                 # Use chmod to set permissions
                 logger.info(f"Setting permissions on VM directory: {vm_dir}")
                 os.system(f"chmod -R 777 {vm_dir}")
+                
+                # We no longer need to chown here as the setup script handles this
                 
                 # Also ensure parent directories have suitable permissions
                 current_dir = vm_dir.parent
@@ -479,35 +494,35 @@ ethernets:
             os_element = ET.SubElement(root, 'os')
             ET.SubElement(os_element, 'type', arch='x86_64', machine='q35').text = 'hvm'
             ET.SubElement(os_element, 'boot', dev='hd')
-            
-            # Features
-            features = ET.SubElement(root, 'features')
-            ET.SubElement(features, 'acpi')
-            ET.SubElement(features, 'apic')
-            
+        
+        # Features
+        features = ET.SubElement(root, 'features')
+        ET.SubElement(features, 'acpi')
+        ET.SubElement(features, 'apic')
+        
             # CPU mode
-            cpu = ET.SubElement(root, 'cpu', mode='host-model')
+        cpu = ET.SubElement(root, 'cpu', mode='host-model')
             
             # Add security model with none driver - this disables the security checks
             # and should resolve the permission issues
             security = ET.SubElement(root, 'seclabel', type='none')
-            
-            # Devices
-            devices = ET.SubElement(root, 'devices')
-            
-            # Disk
-            disk = ET.SubElement(devices, 'disk', type='file', device='disk')
-            ET.SubElement(disk, 'driver', name='qemu', type='raw')
+        
+        # Devices
+        devices = ET.SubElement(root, 'devices')
+        
+        # Disk
+        disk = ET.SubElement(devices, 'disk', type='file', device='disk')
+            ET.SubElement(disk, 'driver', name='qemu', type='raw', cache='none', io='native')
             ET.SubElement(disk, 'source', file=str(absolute_disk_path))
-            ET.SubElement(disk, 'target', dev='vda', bus='virtio')
-            
-            # Network interface
+        ET.SubElement(disk, 'target', dev='vda', bus='virtio')
+        
+        # Network interface
             interface = ET.SubElement(devices, 'interface', type='bridge')
             ET.SubElement(interface, 'source', bridge=bridge_name)
             if mac_address:
                 ET.SubElement(interface, 'mac', address=mac_address)
-            ET.SubElement(interface, 'model', type='virtio')
-            
+        ET.SubElement(interface, 'model', type='virtio')
+        
             # Console
             console = ET.SubElement(devices, 'console', type='pty')
             ET.SubElement(console, 'target', type='serial', port='0')
@@ -546,7 +561,8 @@ ethernets:
 
     def _prepare_cloud_image(self, image_id: str) -> Path:
         """Download and prepare a cloud image if not already present."""
-        images_dir = Path("api/data/vms")
+        # Use the same directory as VM storage for images
+        images_dir = self._get_absolute_path(Path("api/data/vms"))
         images_dir.mkdir(parents=True, exist_ok=True)
         
         cloud_image = images_dir / f"{image_id}.img"
@@ -570,7 +586,7 @@ ethernets:
             url = image_urls[image_id]
             
             # Create a temporary directory for downloads
-            tmp_dir = Path("api/data/tmp")
+            tmp_dir = self._get_absolute_path(Path("api/data/tmp"))
             tmp_dir.mkdir(parents=True, exist_ok=True)
             tmp_file = tmp_dir / f"{image_id}-download.img"
             
@@ -620,18 +636,24 @@ ethernets:
         return cloud_image
 
     def _get_absolute_path(self, path: Path) -> Path:
-        """Ensure we're using absolute paths for qemu commands."""
+        """Convert a relative path to an absolute path."""
         if path.is_absolute():
             return path
-        # If we're running from the project root or api directory,
-        # convert to absolute path
-        current_dir = Path.cwd()
-        if current_dir.name == 'api':
-            # We're in the api directory
-            return current_dir / path
+            
+        # Get the current working directory
+        cwd = Path.cwd()
+        
+        # Check if we're already in the api directory to avoid double 'api' in path
+        if cwd.name == 'api':
+            # If we're in the api directory and the path starts with 'api', remove the prefix
+            path_str = str(path)
+            if path_str.startswith('api/'):
+                path = Path(path_str[4:])  # Remove 'api/' prefix
+                
+            return cwd / path
         else:
-            # Assume we're in the project root
-            return current_dir / path
+            # We're in the project root
+            return cwd / path
 
     def _create_vm_disk(self, cloud_image: Path, vm_disk: Path, size_gb: int) -> None:
         """Create a VM disk based on a cloud image."""
@@ -649,7 +671,9 @@ ethernets:
             
             # Set directory permissions to allow libvirt to access
             try:
-                os.chmod(abs_vm_disk.parent, 0o755)
+                # Use more permissive permissions - 0o777 instead of 0o755
+                os.chmod(abs_vm_disk.parent, 0o777)
+                # We no longer need to chown here as the setup script handles this
             except Exception as perm_error:
                 logger.warning(f"Failed to set permissions on VM directory: {perm_error}")
             
@@ -704,6 +728,8 @@ ethernets:
             try:
                 # Make the disk file readable and writable by everyone
                 os.system(f"chmod 666 {abs_vm_disk}")
+                
+                # We no longer need to chown here as the setup script handles this
                 
                 # Try to make parent directories accessible as well
                 current_dir = abs_vm_disk.parent
@@ -1167,9 +1193,9 @@ ethernets:
     def _prepare_cloud_init_config(self, config: VMConfig) -> Optional[str]:
         """Prepare cloud-init configuration for VM. Returns path to cloud-init ISO."""
         try:
-            if not config.cloud_init:
+        if not config.cloud_init:
                 logger.info("No cloud-init config provided, using defaults")
-                return None
+            return None
             
             # Create temp directory for cloud-init files
             cloud_init_dir = Path(f"api/data/tmp/cloud-init-{config.name}")
