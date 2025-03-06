@@ -108,7 +108,7 @@ class LibvirtManager:
         if not self.conn:
                 raise VMError("Failed to establish libvirt connection")
                 
-            self.ip_manager = ip_manager
+            self.ip_manager = ip_manager or IPManager()
             
             # Define important directories
             try:

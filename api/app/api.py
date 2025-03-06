@@ -13,6 +13,7 @@ from flask_compress import Compress
 from marshmallow import Schema, fields, validate, ValidationError
 import platform
 import random
+import uuid
 
 app = Flask(__name__)
 CORS(app)
@@ -27,16 +28,43 @@ from app.migration import MigrationManager, MigrationConfig, MigrationError
 from app.db import db
 from app.libvirt_utils import get_libvirt_connection
 from app.ip_manager import IPManager
+from app.server_manager import ServerManager, Server
+from app.cluster_vm_manager import ClusterVMManager
+from app.cluster_network_manager import ClusterNetworkManager
+from app.cluster_storage_manager import ClusterStorageManager
+from app.cluster_monitoring import ClusterMonitoring
+from app.cluster_api import cluster_api, init_cluster_managers
 
 # Initialize libvirt connection
 def init_managers():
     global network_manager, vpc_manager, vm_manager, migration_manager, ip_manager
+    global server_manager, cluster_vm_manager, cluster_network_manager, cluster_storage_manager, cluster_monitoring
     conn = get_libvirt_connection()
     network_manager = NetworkManager(conn)
     vpc_manager = VPCManager(network_manager)
     ip_manager = IPManager()
     vm_manager = VMManager(network_manager=network_manager, ip_manager=ip_manager)
     migration_manager = MigrationManager(conn)
+    
+    # Initialize cluster managers
+    server_manager = ServerManager()
+    cluster_vm_manager = ClusterVMManager(server_manager, vpc_manager)
+    cluster_network_manager = ClusterNetworkManager(server_manager, vpc_manager)
+    cluster_storage_manager = ClusterStorageManager(server_manager)
+    cluster_monitoring = ClusterMonitoring(
+        server_manager, 
+        cluster_vm_manager,
+        cluster_network_manager,
+        cluster_storage_manager
+    )
+    
+    # Start monitoring
+    try:
+        cluster_monitoring.start_monitoring()
+    except Exception as e:
+        logger.error(f"Failed to start monitoring: {e}")
+    
+    logger.info("All managers initialized successfully")
 
 try:
     init_managers()
@@ -178,6 +206,15 @@ class MigrationCreateSchema(Schema):
     bandwidth = fields.Int(validate=validate.Range(min=1))
     max_downtime = fields.Int(validate=validate.Range(min=1))
     compressed = fields.Bool()
+
+class ServerSchema(Schema):
+    name = fields.Str(required=True, validate=validate.Length(min=1, max=64))
+    host = fields.Str(required=True)
+    port = fields.Int(validate=validate.Range(min=1, max=65535))
+    username = fields.Str()
+    password = fields.Str()
+    key_path = fields.Str()
+    vm_capacity = fields.Int(validate=validate.Range(min=1, max=1000))
 
 def validate_request(schema_class):
     """Decorator to validate request data against a schema."""
@@ -654,6 +691,355 @@ def get_ip_pool_metrics():
         logger.error(f"Error getting IP pool metrics: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
+
+# Server management endpoints
+@app.route('/api/servers', methods=['GET'])
+@cache.cached(timeout=30, key_prefix=cache_key_prefix)
+def list_servers():
+    """List all servers."""
+    try:
+        servers = server_manager.list_servers()
+        result = [server.to_dict() for server in servers]
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error listing servers: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/servers/<server_id>', methods=['GET'])
+def get_server(server_id):
+    """Get a server by ID."""
+    try:
+        server = server_manager.get_server(server_id)
+        return jsonify(server.to_dict())
+    except Exception as e:
+        logger.error(f"Error getting server {server_id}: {e}")
+        return jsonify({"error": str(e)}), 404
+
+@app.route('/api/servers', methods=['POST'])
+@validate_request(ServerSchema)
+def add_server():
+    """Add a new server."""
+    try:
+        data = request.json
+        
+        # Generate a unique ID for the server
+        server_id = str(uuid.uuid4())[:8]
+        
+        # Create server object
+        server = Server(
+            id=server_id,
+            name=data['name'],
+            host=data['host'],
+            port=data.get('port', 22),
+            username=data.get('username', 'ubuntu'),
+            password=data.get('password'),
+            key_path=data.get('key_path'),
+            vm_capacity=data.get('vm_capacity', 10)
+        )
+        
+        # Add server to manager
+        server_manager.add_server(server)
+        
+        return jsonify(server.to_dict()), 201
+    except Exception as e:
+        logger.error(f"Error adding server: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/servers/<server_id>', methods=['DELETE'])
+def remove_server(server_id):
+    """Remove a server."""
+    try:
+        server_manager.remove_server(server_id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error removing server {server_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/servers/<server_id>/status', methods=['GET'])
+def get_server_status(server_id):
+    """Get server status."""
+    try:
+        server_manager.update_server_status(server_id)
+        server = server_manager.get_server(server_id)
+        
+        # Return server with metrics
+        result = server.to_dict()
+        if server.metrics_history:
+            latest_metrics = server.metrics_history[-1]
+            result['metrics'] = {
+                'cpu_usage': latest_metrics.cpu_usage,
+                'memory_total': latest_metrics.memory_total,
+                'memory_used': latest_metrics.memory_used,
+                'disk_total': latest_metrics.disk_total,
+                'disk_used': latest_metrics.disk_used,
+                'network_rx': latest_metrics.network_rx,
+                'network_tx': latest_metrics.network_tx,
+                'timestamp': latest_metrics.timestamp
+            }
+        
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error getting server status {server_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/servers/<server_id>/command', methods=['POST'])
+def execute_command(server_id):
+    """Execute a command on a server."""
+    try:
+        data = request.json
+        command = data.get('command')
+        
+        if not command:
+            return jsonify({"error": "No command provided"}), 400
+        
+        result = server_manager.execute_command(server_id, command)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error executing command on server {server_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Cluster VM endpoints
+
+@app.route('/api/cluster/vms', methods=['GET'])
+@cache.cached(timeout=30, key_prefix=cache_key_prefix)
+def list_cluster_vms():
+    """List all VMs across all servers."""
+    try:
+        vms = cluster_vm_manager.list_vms()
+        result = [vm.to_dict() for vm in vms]
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error listing cluster VMs: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/cluster/vms/<vm_id>', methods=['GET'])
+def get_cluster_vm(vm_id):
+    """Get a VM by ID from any server."""
+    try:
+        vm = cluster_vm_manager.get_vm(vm_id)
+        return jsonify(vm.to_dict())
+    except Exception as e:
+        logger.error(f"Error getting cluster VM {vm_id}: {e}")
+        return jsonify({"error": str(e)}), 404
+
+@app.route('/api/cluster/vms', methods=['POST'])
+@validate_request(VMCreateSchema)
+def create_cluster_vm():
+    """Create a new VM on the most suitable server."""
+    try:
+        data = request.json
+        
+        # Convert to VMConfig
+        config = VMConfig(
+            name=data['name'],
+            network_name=data['network_name'],
+            cpu_cores=data['cpu_cores'],
+            memory_mb=data['memory_mb'],
+            disk_size_gb=data['disk_size_gb'],
+            image_id=data['image_id'],
+            cloud_init=data.get('cloud_init'),
+            arch=data.get('arch')
+        )
+        
+        # Create VM
+        vm = cluster_vm_manager.create_vm(config)
+        
+        return jsonify(vm.to_dict()), 201
+    except Exception as e:
+        logger.error(f"Error creating cluster VM: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/cluster/vms/<vm_id>', methods=['DELETE'])
+def delete_cluster_vm(vm_id):
+    """Delete a VM from any server."""
+    try:
+        cluster_vm_manager.delete_vm(vm_id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error deleting cluster VM {vm_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/cluster/vms/<vm_id>/migrate', methods=['POST'])
+def migrate_vm(vm_id):
+    """Migrate a VM to another server."""
+    try:
+        data = request.json
+        destination_server_id = data.get('destination_server_id')
+        
+        if not destination_server_id:
+            return jsonify({"error": "No destination server ID provided"}), 400
+        
+        live = data.get('live', True)
+        
+        cluster_vm_manager.migrate_vm(vm_id, destination_server_id, live)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error migrating VM {vm_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Cluster Storage endpoints
+
+@app.route('/api/cluster/volumes', methods=['GET'])
+@cache.cached(timeout=60, key_prefix=cache_key_prefix)
+def list_cluster_volumes():
+    """List all storage volumes across all servers."""
+    try:
+        volumes = cluster_storage_manager.list_volumes()
+        return jsonify(volumes)
+    except Exception as e:
+        logger.error(f"Error listing cluster volumes: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/cluster/volumes/<volume_id>', methods=['GET'])
+def get_cluster_volume(volume_id):
+    """Get a storage volume by ID."""
+    try:
+        volume = cluster_storage_manager.get_volume(volume_id)
+        return jsonify(volume)
+    except Exception as e:
+        logger.error(f"Error getting cluster volume {volume_id}: {e}")
+        return jsonify({"error": str(e)}), 404
+
+@app.route('/api/cluster/volumes', methods=['POST'])
+def create_cluster_volume():
+    """Create a new storage volume."""
+    try:
+        data = request.json
+        name = data.get('name')
+        size_gb = data.get('size_gb')
+        replicated = data.get('replicated', False)
+        
+        if not name or not size_gb:
+            return jsonify({"error": "Name and size_gb are required"}), 400
+        
+        volume = cluster_storage_manager.create_volume(name, size_gb, replicated)
+        return jsonify(volume.to_dict()), 201
+    except Exception as e:
+        logger.error(f"Error creating cluster volume: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/cluster/volumes/<volume_id>', methods=['DELETE'])
+def delete_cluster_volume(volume_id):
+    """Delete a storage volume."""
+    try:
+        cluster_storage_manager.delete_volume(volume_id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error deleting cluster volume {volume_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/cluster/volumes/<volume_id>/attach', methods=['POST'])
+def attach_cluster_volume(volume_id):
+    """Attach a volume to a VM."""
+    try:
+        data = request.json
+        vm_id = data.get('vm_id')
+        vm_server_id = data.get('vm_server_id')
+        
+        if not vm_id or not vm_server_id:
+            return jsonify({"error": "VM ID and server ID are required"}), 400
+        
+        cluster_storage_manager.attach_volume(volume_id, vm_id, vm_server_id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error attaching cluster volume {volume_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/cluster/volumes/<volume_id>/detach', methods=['POST'])
+def detach_cluster_volume(volume_id):
+    """Detach a volume from a VM."""
+    try:
+        cluster_storage_manager.detach_volume(volume_id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error detaching cluster volume {volume_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Monitoring and Logging endpoints
+
+@app.route('/api/monitoring/alerts', methods=['GET'])
+def list_alerts():
+    """List all active alerts."""
+    try:
+        include_resolved = request.args.get('include_resolved', 'false').lower() == 'true'
+        alerts = cluster_monitoring.list_alerts(include_resolved)
+        return jsonify(alerts)
+    except Exception as e:
+        logger.error(f"Error listing alerts: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/monitoring/alerts/<alert_id>/acknowledge', methods=['POST'])
+def acknowledge_alert(alert_id):
+    """Acknowledge an alert."""
+    try:
+        cluster_monitoring.acknowledge_alert(alert_id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error acknowledging alert {alert_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/monitoring/alerts/<alert_id>/resolve', methods=['POST'])
+def resolve_alert(alert_id):
+    """Resolve an alert."""
+    try:
+        cluster_monitoring.resolve_alert(alert_id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error resolving alert {alert_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/monitoring/metrics/<resource_type>', methods=['GET'])
+def get_metrics(resource_type):
+    """Get metrics for a specific resource type."""
+    try:
+        start_time = request.args.get('start_time')
+        end_time = request.args.get('end_time')
+        
+        if start_time:
+            start_time = float(start_time)
+        if end_time:
+            end_time = float(end_time)
+        
+        metrics = cluster_monitoring.get_metrics(resource_type, start_time, end_time)
+        return jsonify(metrics)
+    except Exception as e:
+        logger.error(f"Error getting metrics for {resource_type}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/monitoring/logs/server/<server_id>', methods=['GET'])
+def get_server_logs(server_id):
+    """Get logs from a server."""
+    try:
+        lines = request.args.get('lines', 100)
+        logs = cluster_monitoring.get_server_logs(server_id, int(lines))
+        return jsonify(logs)
+    except Exception as e:
+        logger.error(f"Error getting logs for server {server_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/monitoring/logs/vm/<vm_id>', methods=['GET'])
+def get_vm_logs(vm_id):
+    """Get logs for a VM."""
+    try:
+        lines = request.args.get('lines', 100)
+        logs = cluster_monitoring.get_vm_logs(vm_id, int(lines))
+        return jsonify(logs)
+    except Exception as e:
+        logger.error(f"Error getting logs for VM {vm_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/monitoring/health', methods=['GET'])
+def get_cluster_health():
+    """Get overall cluster health status."""
+    try:
+        health = cluster_monitoring.get_cluster_health()
+        return jsonify(health)
+    except Exception as e:
+        logger.error(f"Error getting cluster health: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Register the cluster API blueprint
+app.register_blueprint(cluster_api)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True) 
